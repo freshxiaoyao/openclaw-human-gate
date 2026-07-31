@@ -1,5 +1,9 @@
 # openclaw-human-gate
 
+[![npm version](https://img.shields.io/npm/v/openclaw-human-gate.svg)](https://www.npmjs.com/package/openclaw-human-gate)
+
+[![npm downloads](https://img.shields.io/npm/dm/openclaw-human-gate.svg)](https://www.npmjs.com/package/openclaw-human-gate)
+
 Human-in-the-loop approval middleware for [OpenClaw](https://github.com/openclaw/openclaw).
 
 Intercepts tool execution with a `before_tool_call` hook and routes selected
