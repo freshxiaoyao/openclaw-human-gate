@@ -1,0 +1,123 @@
+{
+  "id": "human-gate",
+  "name": "Human Gate",
+  "description": "Human-in-the-loop approval middleware. Routes selected tool calls through OpenClaw's built-in approval flow (TUI / Control UI / chat /approve) before execution. Also adds a Claude Code-style ask tool for clarification.",
+  "contracts": {
+    "tools": ["human_gate_ask"]
+  },
+  "toolMetadata": {
+    "human_gate_ask": { "optional": true }
+  },
+  "activation": {
+    "onStartup": true
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "defaultMode": {
+        "type": "string",
+        "enum": ["auto", "require-approval", "block"],
+        "default": "auto",
+        "description": "Fallback decision for a tool that no rule and no classifier matches. Default 'auto' (low friction); set 'require-approval' for a strict shop."
+      },
+      "defaultSeverity": {
+        "type": "string",
+        "enum": ["info", "warning", "critical"],
+        "default": "warning"
+      },
+      "defaultTimeoutMs": {
+        "type": "integer",
+        "minimum": 1000,
+        "maximum": 600000,
+        "default": 300000
+      },
+      "rememberAllowAlways": {
+        "type": "boolean",
+        "default": true,
+        "description": "Persist allow-always decisions per session so they are not re-prompted."
+      },
+      "useClassifiers": {
+        "type": "boolean",
+        "default": true,
+        "description": "Run the built-in read-only/destructive classifier after user rules. Reads pass through; writes/exec get gated without listing every tool."
+      },
+      "approvalWindow": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "After approving one destructive call, further same-class calls auto-pass for a turn or time box, so multi-step write tasks don't prompt once per file.",
+        "properties": {
+          "mode": {
+            "type": "string",
+            "enum": ["off", "turn", "time"],
+            "default": "turn",
+            "description": "off = prompt every destructive call; turn = auto-pass for the rest of the current agent run; time = auto-pass for ttlMs."
+          },
+          "ttlMs": {
+            "type": "integer",
+            "minimum": 1000,
+            "maximum": 3600000,
+            "default": 300000,
+            "description": "Window duration for mode 'time'. Ignored otherwise."
+          },
+          "match": {
+            "type": "string",
+            "enum": ["destructive", "same-tool"],
+            "default": "same-tool",
+            "description": "same-tool = only the approved tool shares a window (safer default); destructive = one shared window for all gated writes."
+          },
+          "bypassCritical": {
+            "type": "boolean",
+            "default": true,
+            "description": "severity 'critical' calls always prompt even when a window is open (e.g. production deploys)."
+          }
+        }
+      },
+      "autoPassSessionKeys": {
+        "type": "array",
+        "items": { "type": "string" },
+        "default": [":cron:", ":heartbeat"],
+        "description": "Session key substrings that auto-pass the gate (no human to ask). Cron isolated runs and heartbeat isolated runs by default."
+      },
+      "rules": {
+        "type": "array",
+        "description": "Ordered policy rules. First match wins.",
+        "items": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["id", "mode"],
+          "properties": {
+            "id": { "type": "string" },
+            "toolName": {
+              "type": "string",
+              "description": "Exact tool name. Omit to match any tool."
+            },
+            "toolNamePattern": {
+              "type": "string",
+              "description": "Regex matched against toolName. Omit for no pattern."
+            },
+            "toolKind": {
+              "type": "string",
+              "description": "Match host toolKind discriminator (e.g. code_mode_exec, exec, apply_patch)."
+            },
+            "mode": {
+              "type": "string",
+              "enum": ["auto", "require-approval", "block"]
+            },
+            "severity": {
+              "type": "string",
+              "enum": ["info", "warning", "critical"]
+            },
+            "allowedDecisions": {
+              "type": "array",
+              "items": { "type": "string", "enum": ["allow-once", "allow-always", "deny"] }
+            },
+            "timeoutMs": { "type": "integer", "minimum": 1000, "maximum": 600000 },
+            "reason": { "type": "string" }
+          }
+        },
+        "default": []
+      }
+    }
+  }
+}
