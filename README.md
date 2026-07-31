@@ -24,6 +24,27 @@ its own terminal UI; it reuses OpenClaw's.
                        Approve / Reject / Modify
 ```
 
+## Features
+
+- **`before_tool_call` interception** — every tool call is classified before
+  execution via a priority-60 hook.
+- **Built-in approval workflow** — selected calls pause the run and ask the
+  human through OpenClaw's own approval surfaces (TUI / Control UI / chat
+  `/approve`); no custom UI to learn.
+- **Three policy modes per rule** — `auto` (pass), `require-approval` (prompt),
+  `block` (deny with reason), with a configurable `defaultMode` fallback.
+- **Zero-config sensible defaults** — reads pass, destructive calls (`exec`,
+  `apply_patch`, `code_mode_exec`) prompt, everything else auto.
+- **Approval window** — approving one destructive call auto-passes matching
+  calls for the rest of the turn (or a time box), so multi-step refactors
+  don't prompt once per file.
+- **`allow-always` per session** — grant once, skip re-prompting for that
+  session.
+- **Auto-pass for cron / heartbeat** — scheduled runs are never blocked on an
+  approval nobody can see.
+- **`human_gate_ask` tool** — Claude Code-style "ask the human" for
+  clarification or decisions.
+
 ## How it works
 
 OpenClaw already ships a first-class approval mechanism: a `before_tool_call`
@@ -111,18 +132,25 @@ per-(rule, tool) grant for the whole session.
 ## Install
 
 ```bash
-# from ClawHub (once published)
-openclaw plugins install clawhub:openclaw-human-gate
+# from ClawHub / npm (once published)
+openclaw plugins install openclaw-human-gate
 
 # from a local tarball (for development)
 npm pack --pack-destination /tmp
-openclaw plugins install npm-pack:/tmp/openclaw-human-gate-0.1.0.tgz --force
+# uninstall first if an older version is installed, then install the new pack
+openclaw plugins uninstall human-gate
+openclaw plugins install npm-pack:/tmp/openclaw-human-gate-0.1.1.tgz
 
 # inspect
 openclaw plugins inspect human-gate --runtime --json
 ```
 
 Requires OpenClaw `>= 2026.7.2` (Node 22.22.3+ / 24.15+ / 25.9+).
+
+## Screenshots
+
+> Screenshots go here — approval prompt in the Control UI / TUI, and an example
+> `human_gate_ask` question in chat. (TODO: add captures)
 
 ## Build
 

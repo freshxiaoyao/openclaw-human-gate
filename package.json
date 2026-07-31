@@ -1,11 +1,32 @@
 {
   "name": "openclaw-human-gate",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Human-in-the-loop approval middleware for OpenClaw. Intercepts tool execution via before_tool_call and routes destructive calls through the built-in approval flow (TUI / Control UI / chat).",
   "type": "module",
   "license": "MIT",
-  "keywords": ["openclaw", "plugin", "approval", "human-in-the-loop", "gate"],
-  "files": ["dist/*.js", "dist/*.d.ts", "dist/*.map", "openclaw.plugin.json"],
+  "keywords": [
+    "openclaw",
+    "plugin",
+    "agent",
+    "human-in-the-loop",
+    "ai-safety",
+    "approval",
+    "gate"
+  ],
+  "files": [
+    "dist/*.js",
+    "dist/*.d.ts",
+    "dist/*.map",
+    "openclaw.plugin.json"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/freshxiaoyao/openclaw-human-gate.git"
+  },
+  "homepage": "https://github.com/freshxiaoyao/openclaw-human-gate",
+  "bugs": {
+    "url": "https://github.com/freshxiaoyao/openclaw-human-gate/issues"
+  },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "scripts": {
@@ -20,14 +41,18 @@
     "openclaw": ">=2026.7.1"
   },
   "peerDependenciesMeta": {
-    "openclaw": { "optional": true }
+    "openclaw": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "typescript": "^5.6.0",
     "typebox": "1.1.39"
   },
   "openclaw": {
-    "extensions": ["./dist/index.js"],
+    "extensions": [
+      "./dist/index.js"
+    ],
     "compat": {
       "pluginApi": ">=2026.7.1",
       "minGatewayVersion": "2026.7.1"
