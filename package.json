@@ -5,7 +5,7 @@
   "type": "module",
   "license": "MIT",
   "keywords": ["openclaw", "plugin", "approval", "human-in-the-loop", "gate"],
-  "files": ["dist", "openclaw.plugin.json"],
+  "files": ["dist/*.js", "dist/*.d.ts", "dist/*.map", "openclaw.plugin.json"],
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "scripts": {

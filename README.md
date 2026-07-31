@@ -58,6 +58,27 @@ operations:
 Disable classification with `useClassifiers: false` to rely solely on explicit
 rules + `defaultMode`.
 
+## Auto-pass system contexts (cron / heartbeat)
+
+Scheduled runs (cron jobs, heartbeat) have no human at the keyboard, so an
+approval prompt would stall them indefinitely. By default the gate
+**auto-passes** any tool call whose session key contains `:cron:` or
+`:heartbeat` (cron isolated runs and heartbeat isolated runs — enable
+`agents.defaults.heartbeat.isolatedSession: true` so heartbeat runs get their
+own `<session>:heartbeat` key):
+
+```json5
+{
+  autoPassSessionKeys: [":cron:", ":heartbeat"], // session-key substrings that skip the gate
+}
+```
+
+- Matched calls bypass policy evaluation entirely (no prompt, no block).
+- Add your own substrings (e.g. `:subagent:`) to auto-pass other run kinds;
+  remove the defaults to gate everything again.
+- Regular interactive sessions never match these, so approvals still apply
+  when a human is present.
+
 ## Approval window (less popup fatigue)
 
 Gating every write means a multi-step task (refactor 10 files) prompts 10

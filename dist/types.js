@@ -18,8 +18,6 @@ export const DEFAULT_CONFIG = {
         bypassCritical: true,
     },
     rules: [],
-    /** Session key substrings that auto-pass the gate (no human to ask): cron
-     *  isolated runs and heartbeat isolated runs by default. */
     autoPassSessionKeys: [":cron:", ":heartbeat"],
 };
 /** host toolKind values that always have side effects → require approval. */

@@ -70,6 +70,9 @@ function resolveConfig(pluginConfig: unknown): HumanGateConfig {
     useClassifiers: typeof pluginConfig.useClassifiers === "boolean" ? pluginConfig.useClassifiers : DEFAULT_CONFIG.useClassifiers,
     approvalWindow: resolveWindowConfig(pluginConfig.approvalWindow),
     rules: Array.isArray(pluginConfig.rules) ? (pluginConfig.rules as HumanGateConfig["rules"]) : [],
+    autoPassSessionKeys: Array.isArray(pluginConfig.autoPassSessionKeys)
+      ? (pluginConfig.autoPassSessionKeys as unknown[]).map(String)
+      : DEFAULT_CONFIG.autoPassSessionKeys,
   };
   return cfg;
 }
@@ -193,6 +196,18 @@ export default definePluginEntry({
 
         const pluginConfig = (event.context?.pluginConfig ?? {}) as unknown;
         const config = resolveConfig(pluginConfig);
+
+        // System contexts (cron isolated runs, heartbeat isolated runs) have
+        // no human at the keyboard; auto-pass so scheduled maintenance and
+        // heartbeat fixes are never blocked on an approval nobody can see.
+        const sessionKey = ctx.sessionKey ?? "";
+        if (config.autoPassSessionKeys.some((p) => p && sessionKey.includes(p))) {
+          log.debug("human-gate: auto-pass system context", {
+            tool: event.toolName,
+            sessionKey,
+          });
+          return undefined;
+        }
 
         const decision = evaluatePolicy(event.toolName, event.toolKind, config);
 

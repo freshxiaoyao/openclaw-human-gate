@@ -51,6 +51,11 @@ export interface HumanGateConfig {
     approvalWindow: ApprovalWindowConfig;
     /** Ordered policy rules. First match wins. */
     rules: GateRule[];
+    /** Session key substrings that auto-pass the gate entirely (no human to
+     *  ask): cron isolated runs and heartbeat isolated runs by default. A call
+     *  whose sessionKey contains any of these strings skips policy evaluation
+     *  and passes through. */
+    autoPassSessionKeys: string[];
 }
 /** Reduces popup fatigue for multi-step write tasks. */
 export interface ApprovalWindowConfig {
