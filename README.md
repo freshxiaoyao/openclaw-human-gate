@@ -25,7 +25,7 @@ its own terminal UI; it reuses OpenClaw's.
                        OpenClaw approval flow
                        (TUI / Web UI / /approve)
                                ↓
-                       Approve / Reject / Modify
+                       allow-once / allow-always / deny
 ```
 
 ## Features
@@ -154,13 +154,13 @@ openclaw plugins install openclaw-human-gate
 npm pack --pack-destination /tmp
 # uninstall first if an older version is installed, then install the new pack
 openclaw plugins uninstall human-gate
-openclaw plugins install npm-pack:/tmp/openclaw-human-gate-0.1.1.tgz
+openclaw plugins install npm-pack:/tmp/openclaw-human-gate-0.1.3.tgz
 
 # inspect
 openclaw plugins inspect human-gate --runtime --json
 ```
 
-Requires OpenClaw `>= 2026.7.2` (Node 22.22.3+ / 24.15+ / 25.9+).
+Requires OpenClaw `>= 2026.7.1` (Node 22.22.3+ / 24.15+ / 25.9+).
 
 ## Screenshots
 
