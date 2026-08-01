@@ -6,7 +6,7 @@
  * contract this plugin relies on).
  */
 export const DEFAULT_CONFIG = {
-    defaultMode: "auto",
+    defaultMode: "require-approval",
     defaultSeverity: "warning",
     defaultTimeoutMs: 300_000,
     rememberAllowAlways: true,
@@ -35,12 +35,28 @@ export const READONLY_TOOL_KINDS = new Set([
     "grep",
     "fetch",
 ]);
-/** Name patterns (applied to toolName) for tools without a recognised toolKind.
- *  Evaluated as prefix match on the snake/camel first segment. */
-export const READONLY_NAME_PATTERN = /^(read|get|list|search|glob|grep|view|show|status|ping|fetch|head|cat|ls|find|whoami|echo|inspect|describe|explain|query|count)[_-a-zA-Z0-9]*$/i;
-export const DESTRUCTIVE_NAME_PATTERN = /^(write|edit|delete|remove|rm|rmdir|mkdir|move|rename|deploy|publish|install|uninstall|exec|run|apply|patch|create|update|kill|send|post|put|push|commit|flush|drop|truncate|grant|revoke)[_-a-zA-Z0-9]*$/i;
+/** Destructive / read-only vocabulary for the name classifier.
+ *
+ * Tokens are matched against the *whole* tool name after splitting it into
+ * segments (camelCase, snake_case, kebab-case, digits). Destructive tokens are
+ * checked FIRST, so a composite name like `readWriteFile` or `getDeleteUser`
+ * is gated even though it also contains a read-only token. A name that
+ * contains neither a destructive nor a read-only token is unknown and falls
+ * through to `defaultMode` (which defaults to `require-approval`). */
+export const DESTRUCTIVE_NAME_TOKENS = [
+    "write", "edit", "delete", "remove", "rm", "rmdir", "mkdir",
+    "move", "rename", "deploy", "publish", "install", "uninstall",
+    "exec", "run", "apply", "patch", "create", "update", "kill",
+    "send", "post", "put", "push", "commit", "flush", "drop",
+    "truncate", "grant", "revoke",
+];
+export const READONLY_NAME_TOKENS = [
+    "read", "get", "list", "search", "glob", "grep", "view", "show",
+    "status", "ping", "fetch", "head", "cat", "ls", "find", "whoami",
+    "echo", "inspect", "describe", "explain", "query", "count",
+];
 /** Explicit built-in rules for known destructive toolKinds, applied after user
- *  rules. These carry severity / allowedDecisions defaults; the name-pattern
+ *  rules. These carry severity / allowedDecisions defaults; the name-token
  *  classifier synthesises a lighter-weight decision for matched names. */
 export const BUILTIN_DESTRUCTIVE_RULES = [
     {

@@ -1,13 +1,5 @@
-/**
- * Per-session allow-always memory.
- *
- * When a human picks "allow-always" for a (rule, tool) pair, we record it in a
- * plugin-owned session extension so the same combination is auto-approved for
- * the rest of the session. Falls back to pure in-memory storage when the
- * session extension is unavailable (e.g. older OpenClaw runtimes).
- */
+/** Per-session allow-always state backed by OpenClaw session extensions. */
 
-import type { SessionExtensionHandle } from "openclaw/plugin-sdk/plugin-entry";
 import { allowAlwaysKey } from "./types.js";
 
 export interface AllowAlwaysState {
@@ -15,56 +7,47 @@ export interface AllowAlwaysState {
   grants: Record<string, string>;
 }
 
+export type SessionStateReader<T> = (sessionKey: string) => T | undefined;
+export type SessionStateUpdater<T> = (
+  sessionKey: string,
+  update: (current: T) => T,
+) => Promise<void>;
+
+function normalizeState(value: AllowAlwaysState | undefined): AllowAlwaysState {
+  if (!value || typeof value !== "object" || !value.grants || typeof value.grants !== "object") {
+    return { grants: {} };
+  }
+  return { grants: { ...value.grants } };
+}
+
 export class AllowAlwaysStore {
-  private readonly handle: SessionExtensionHandle<AllowAlwaysState> | null;
-  /** In-memory fallback when session extension is unavailable. */
-  private readonly memory: AllowAlwaysState = { grants: {} };
+  constructor(
+    private readonly read: SessionStateReader<AllowAlwaysState>,
+    private readonly update: SessionStateUpdater<AllowAlwaysState>,
+  ) {}
 
-  constructor(handle: SessionExtensionHandle<AllowAlwaysState> | null) {
-    this.handle = handle ?? null;
-  }
-
-  private state(): AllowAlwaysState {
-    if (!this.handle) return this.memory;
-    try {
-      return this.handle.get() ?? this.memory;
-    } catch {
-      return this.memory;
-    }
-  }
-
-  private write(state: AllowAlwaysState): void {
-    if (!this.handle) {
-      this.memory.grants = state.grants;
-      return;
-    }
-    try {
-      this.handle.set(state);
-    } catch {
-      this.memory.grants = state.grants;
-    }
-  }
-
-  isGranted(ruleId: string, toolName: string): boolean {
-    const state = this.state();
+  isGranted(sessionKey: string, ruleId: string, toolName: string): boolean {
+    const state = normalizeState(this.read(sessionKey));
     return Boolean(state.grants[allowAlwaysKey(ruleId, toolName)]);
   }
 
-  grant(ruleId: string, toolName: string): void {
-    const current = this.state();
-    const next: AllowAlwaysState = { grants: { ...current.grants } };
-    next.grants[allowAlwaysKey(ruleId, toolName)] = new Date().toISOString();
-    this.write(next);
+  async grant(sessionKey: string, ruleId: string, toolName: string): Promise<void> {
+    await this.update(sessionKey, (current) => {
+      const next = normalizeState(current);
+      next.grants[allowAlwaysKey(ruleId, toolName)] = new Date().toISOString();
+      return next;
+    });
   }
 
-  revoke(ruleId: string, toolName: string): void {
-    const current = this.state();
-    const next: AllowAlwaysState = { grants: { ...current.grants } };
-    delete next.grants[allowAlwaysKey(ruleId, toolName)];
-    this.write(next);
+  async revoke(sessionKey: string, ruleId: string, toolName: string): Promise<void> {
+    await this.update(sessionKey, (current) => {
+      const next = normalizeState(current);
+      delete next.grants[allowAlwaysKey(ruleId, toolName)];
+      return next;
+    });
   }
 
-  snapshot(): AllowAlwaysState {
-    return this.state();
+  snapshot(sessionKey: string): AllowAlwaysState {
+    return normalizeState(this.read(sessionKey));
   }
 }

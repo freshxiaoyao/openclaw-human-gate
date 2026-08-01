@@ -202,40 +202,12 @@ export function evaluatePolicy(
     if (classified) return classified;
   }
 
-  // 4. Fallback. The decision carries a synthesised rule so that
-  //    allow-always can be persisted keyed on ("builtin:default-mode",
-  //    toolName) instead of silently failing to remember.
+  // 4. Fallback.
   return {
     mode: config.defaultMode,
     severity: config.defaultSeverity,
     timeoutMs: clampTimeout(config.defaultTimeoutMs),
     allowedDecisions: ["allow-once", "allow-always", "deny"],
     reason: `No rule or classifier matched; default mode "${config.defaultMode}"`,
-    rule: {
-      id: "builtin:default-mode",
-      mode: config.defaultMode,
-      reason: `No rule or classifier matched; default mode "${config.defaultMode}"`,
-    },
   };
-}
-
-/** True when a session key belongs to an unattended context (cron isolated
- *  runs, heartbeat runs, subagents) that must not stall on an approval
- *  popup nobody can see.
- *
- *  Matching is exact per `:`-delimited segment — NOT a loose substring match —
- *  so `:cron:` never matches a key like `cronx:` or `x:cronology`. Configured
- *  keys may be written with or without surrounding colons (`":cron:"`,
- *  `":heartbeat"`, `"subagent"` all work); a bare value matches only a
- *  standalone segment.
- */
-export function isAutoPassContext(
-  sessionKey: string,
-  keys: readonly string[],
-): boolean {
-  const segments = new Set(sessionKey.split(":"));
-  return keys.some((key) => {
-    const cleaned = key.replace(/^:+|:+$/g, "");
-    return cleaned !== "" && segments.has(cleaned);
-  });
 }

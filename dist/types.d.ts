@@ -32,9 +32,9 @@ export interface GateRule {
 }
 export interface HumanGateConfig {
     /** Fallback decision for a tool that no rule and no classifier matches.
-     *  Default: "auto" (fail-open for unknowns — low friction). Set to
-     *  "require-approval" for a strict shop where anything unrecognized must be
-     *  approved. */
+     *  Default: "require-approval" (fail-closed — an unrecognized tool must be
+     *  approved by a human). Set to "auto" only if you accept unknown tools
+     *  passing through ungated. */
     defaultMode: GateMode;
     defaultSeverity: GateSeverity;
     defaultTimeoutMs: number;
@@ -51,10 +51,11 @@ export interface HumanGateConfig {
     approvalWindow: ApprovalWindowConfig;
     /** Ordered policy rules. First match wins. */
     rules: GateRule[];
-    /** Session key substrings that auto-pass the gate entirely (no human to
-     *  ask): cron isolated runs and heartbeat isolated runs by default. A call
-     *  whose sessionKey contains any of these strings skips policy evaluation
-     *  and passes through. */
+    /** Session-key `:`-delimited segments that auto-pass the approval prompt
+     *  (no human to ask): cron isolated runs and heartbeat isolated runs by
+     *  default. Matching is exact per segment, not substring (`":cron:"`
+     *  matches `agent:main:cron:run-1` but not `x:cronx:`). Auto-pass exempts
+     *  ONLY require-approval prompts — `block` rules are still enforced. */
     autoPassSessionKeys: string[];
 }
 /** Reduces popup fatigue for multi-step write tasks. */
@@ -79,12 +80,18 @@ export declare const DESTRUCTIVE_TOOL_KINDS: Set<string>;
 /** host toolKind values that are pure observation → auto. Keep conservative:
  *  only kinds we know are read-only. Unknown kinds are NOT assumed read-only. */
 export declare const READONLY_TOOL_KINDS: Set<string>;
-/** Name patterns (applied to toolName) for tools without a recognised toolKind.
- *  Evaluated as prefix match on the snake/camel first segment. */
-export declare const READONLY_NAME_PATTERN: RegExp;
-export declare const DESTRUCTIVE_NAME_PATTERN: RegExp;
+/** Destructive / read-only vocabulary for the name classifier.
+ *
+ * Tokens are matched against the *whole* tool name after splitting it into
+ * segments (camelCase, snake_case, kebab-case, digits). Destructive tokens are
+ * checked FIRST, so a composite name like `readWriteFile` or `getDeleteUser`
+ * is gated even though it also contains a read-only token. A name that
+ * contains neither a destructive nor a read-only token is unknown and falls
+ * through to `defaultMode` (which defaults to `require-approval`). */
+export declare const DESTRUCTIVE_NAME_TOKENS: readonly string[];
+export declare const READONLY_NAME_TOKENS: readonly string[];
 /** Explicit built-in rules for known destructive toolKinds, applied after user
- *  rules. These carry severity / allowedDecisions defaults; the name-pattern
+ *  rules. These carry severity / allowedDecisions defaults; the name-token
  *  classifier synthesises a lighter-weight decision for matched names. */
 export declare const BUILTIN_DESTRUCTIVE_RULES: GateRule[];
 /** Result of evaluating the policy against one tool call. */

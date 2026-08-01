@@ -27,47 +27,75 @@
  */
 import { Type } from "typebox";
 import { definePluginEntry, } from "openclaw/plugin-sdk/plugin-entry";
-import { DEFAULT_CONFIG, allowAlwaysKey, parseAskInput, formatAskForChat, askDetails, } from "./types.js";
-import { evaluatePolicy } from "./policy.js";
+import { allowAlwaysKey, parseAskInput, formatAskForChat, askDetails, } from "./types.js";
+import { resolveConfig } from "./config.js";
+import { evaluatePolicy, isAutoPassContext } from "./policy.js";
 import { AllowAlwaysStore } from "./state.js";
 import { ApprovalWindowStore } from "./window.js";
-import { createInMemoryHandle } from "./in-memory-handle.js";
 const PLUGIN_ID = "human-gate";
 const ASK_TOOL_NAME = "human_gate_ask";
-const SESSION_EXT_ID = "human-gate:allow-always";
-const WINDOW_EXT_ID = "human-gate:approval-window";
+const ALLOW_ALWAYS_NAMESPACE = "allow-always";
+const WINDOW_NAMESPACE = "approval-window";
 const HOOK_PRIORITY = 60;
-function isObject(v) {
-    return typeof v === "object" && v !== null;
+function parseAllowAlwaysState(value) {
+    if (!value || typeof value !== "object" || Array.isArray(value))
+        return undefined;
+    const grants = value.grants;
+    if (!grants || typeof grants !== "object" || Array.isArray(grants))
+        return undefined;
+    const normalized = {};
+    for (const [key, timestamp] of Object.entries(grants)) {
+        if (typeof timestamp === "string")
+            normalized[key] = timestamp;
+    }
+    return { grants: normalized };
 }
-/** Merge validated pluginConfig (from manifest configSchema) over defaults. */
-function resolveConfig(pluginConfig) {
-    if (!isObject(pluginConfig))
-        return { ...DEFAULT_CONFIG };
-    const cfg = {
-        defaultMode: pluginConfig.defaultMode ?? DEFAULT_CONFIG.defaultMode,
-        defaultSeverity: pluginConfig.defaultSeverity ?? DEFAULT_CONFIG.defaultSeverity,
-        defaultTimeoutMs: typeof pluginConfig.defaultTimeoutMs === "number" ? pluginConfig.defaultTimeoutMs : DEFAULT_CONFIG.defaultTimeoutMs,
-        rememberAllowAlways: typeof pluginConfig.rememberAllowAlways === "boolean" ? pluginConfig.rememberAllowAlways : DEFAULT_CONFIG.rememberAllowAlways,
-        useClassifiers: typeof pluginConfig.useClassifiers === "boolean" ? pluginConfig.useClassifiers : DEFAULT_CONFIG.useClassifiers,
-        approvalWindow: resolveWindowConfig(pluginConfig.approvalWindow),
-        rules: Array.isArray(pluginConfig.rules) ? pluginConfig.rules : [],
-        autoPassSessionKeys: Array.isArray(pluginConfig.autoPassSessionKeys)
-            ? pluginConfig.autoPassSessionKeys.map(String)
-            : DEFAULT_CONFIG.autoPassSessionKeys,
-    };
-    return cfg;
+function parseWindowState(value) {
+    if (!value || typeof value !== "object" || Array.isArray(value))
+        return undefined;
+    const windows = value.windows;
+    if (!windows || typeof windows !== "object" || Array.isArray(windows))
+        return undefined;
+    const normalized = {};
+    for (const [key, entry] of Object.entries(windows)) {
+        if (!entry || typeof entry !== "object" || Array.isArray(entry))
+            continue;
+        const openedAt = entry.openedAt;
+        const runId = entry.runId;
+        if (typeof openedAt !== "number" || !Number.isFinite(openedAt))
+            continue;
+        normalized[key] = {
+            openedAt,
+            ...(typeof runId === "string" ? { runId } : {}),
+        };
+    }
+    return { windows: normalized };
 }
-function resolveWindowConfig(raw) {
-    const d = DEFAULT_CONFIG.approvalWindow;
-    if (typeof raw !== "object" || raw === null)
-        return { ...d };
-    const o = raw;
-    const mode = o.mode === "off" || o.mode === "turn" || o.mode === "time" ? o.mode : d.mode;
-    const match = o.match === "same-tool" || o.match === "destructive" ? o.match : d.match;
-    const ttlMs = typeof o.ttlMs === "number" ? Math.min(Math.max(o.ttlMs, 1000), 3_600_000) : d.ttlMs;
-    const bypassCritical = typeof o.bypassCritical === "boolean" ? o.bypassCritical : d.bypassCritical;
-    return { mode, match, ttlMs, bypassCritical };
+function extensionValue(api, sessionKey, namespace) {
+    const entry = api.runtime.agent.session.getSessionEntry({
+        sessionKey,
+        readConsistency: "latest",
+    });
+    return entry?.pluginExtensions?.[PLUGIN_ID]?.[namespace];
+}
+async function patchExtension(api, sessionKey, namespace, fallback, parse, update) {
+    const patched = await api.runtime.agent.session.patchSessionEntry({
+        cfg: api.config,
+        sessionKey,
+        readConsistency: "latest",
+        preserveActivity: true,
+        update: (entry) => {
+            const pluginExtensions = { ...entry.pluginExtensions };
+            const pluginState = { ...pluginExtensions[PLUGIN_ID] };
+            const current = parse(pluginState[namespace]) ?? fallback;
+            pluginState[namespace] = update(current);
+            pluginExtensions[PLUGIN_ID] = pluginState;
+            return { pluginExtensions };
+        },
+    });
+    if (!patched) {
+        throw new Error(`human-gate: unknown session key: ${sessionKey}`);
+    }
 }
 function truncate(text, max) {
     return text.length <= max ? text : `${text.slice(0, Math.max(0, max - 1))}…`;
@@ -124,61 +152,23 @@ export default definePluginEntry({
     description: "Human-in-the-loop approval middleware. Routes selected tool calls through OpenClaw's built-in approval flow before execution. Also adds Claude Code-style interactive ask prompts when the AI needs clarification.",
     register(api) {
         const log = api.logger;
-        // Session extension for allow-always grants. Falls back to in-memory if the
-        // host runtime does not support session extensions.
-        let allowAlwaysHandle;
-        try {
-            const h = api.session.state.registerSessionExtension({ id: SESSION_EXT_ID, defaultValue: { grants: {} } });
-            allowAlwaysHandle =
-                h && typeof h.get === "function"
-                    ? h
-                    : createInMemoryHandle({ grants: {} });
-            if (h && typeof h.get !== "function") {
-                log.warn("human-gate: session extension handle missing .get(); using in-memory fallback");
-            }
-        }
-        catch (err) {
-            log.warn("human-gate: session extension registration failed; using in-memory fallback", {
-                error: String(err),
-            });
-            allowAlwaysHandle = createInMemoryHandle({ grants: {} });
-        }
-        const allowAlways = new AllowAlwaysStore(allowAlwaysHandle);
-        // Session extension for the approval window (same defensive pattern).
-        let windowHandle;
-        try {
-            const h = api.session.state.registerSessionExtension({ id: WINDOW_EXT_ID, defaultValue: { windows: {} } });
-            windowHandle =
-                h && typeof h.get === "function" ? h : createInMemoryHandle({ windows: {} });
-            if (h && typeof h.get !== "function") {
-                log.warn("human-gate: window extension handle missing .get(); using in-memory fallback");
-            }
-        }
-        catch (err) {
-            log.warn("human-gate: window extension registration failed; using in-memory fallback", {
-                error: String(err),
-            });
-            windowHandle = createInMemoryHandle({ windows: {} });
-        }
-        const approvalWindow = new ApprovalWindowStore(windowHandle);
+        const config = resolveConfig(api.pluginConfig);
+        api.session.state.registerSessionExtension({
+            namespace: ALLOW_ALWAYS_NAMESPACE,
+            description: "Per-session allow-always grants for Human Gate",
+        });
+        api.session.state.registerSessionExtension({
+            namespace: WINDOW_NAMESPACE,
+            description: "Per-session approval windows for Human Gate",
+        });
+        const allowAlways = new AllowAlwaysStore((sessionKey) => parseAllowAlwaysState(extensionValue(api, sessionKey, ALLOW_ALWAYS_NAMESPACE)), (sessionKey, update) => patchExtension(api, sessionKey, ALLOW_ALWAYS_NAMESPACE, { grants: {} }, parseAllowAlwaysState, update));
+        const approvalWindow = new ApprovalWindowStore((sessionKey) => parseWindowState(extensionValue(api, sessionKey, WINDOW_NAMESPACE)), (sessionKey, update) => patchExtension(api, sessionKey, WINDOW_NAMESPACE, { windows: {} }, parseWindowState, update));
         // ── Primary approval gate (priority 60) ──
         api.on("before_tool_call", (event, ctx) => {
             // Skip the ask tool — it has its own dedicated hook below
             if (event.toolName === ASK_TOOL_NAME)
                 return undefined;
-            const pluginConfig = (event.context?.pluginConfig ?? {});
-            const config = resolveConfig(pluginConfig);
-            // System contexts (cron isolated runs, heartbeat isolated runs) have
-            // no human at the keyboard; auto-pass so scheduled maintenance and
-            // heartbeat fixes are never blocked on an approval nobody can see.
             const sessionKey = ctx.sessionKey ?? "";
-            if (config.autoPassSessionKeys.some((p) => p && sessionKey.includes(p))) {
-                log.debug("human-gate: auto-pass system context", {
-                    tool: event.toolName,
-                    sessionKey,
-                });
-                return undefined;
-            }
             const decision = evaluatePolicy(event.toolName, event.toolKind, config);
             log.debug("human-gate: evaluated", {
                 tool: event.toolName,
@@ -190,6 +180,8 @@ export default definePluginEntry({
             if (decision.mode === "auto") {
                 return undefined;
             }
+            // block is unconditional: a tool the operator explicitly banned must
+            // never run, even in an unattended cron/heartbeat context.
             if (decision.mode === "block") {
                 const blockReason = decision.reason;
                 log.warn("human-gate: blocking tool call", {
@@ -203,10 +195,23 @@ export default definePluginEntry({
                 };
             }
             // decision.mode === "require-approval"
+            // Unattended contexts (cron / heartbeat / subagent) have no human at
+            // the popup, so skip the approval prompt — but ONLY the prompt.
+            // `block` above still applies: autoPass exempts require-approval,
+            // never user-forbidden tools.
+            if (sessionKey &&
+                isAutoPassContext(sessionKey, config.autoPassSessionKeys)) {
+                log.debug("human-gate: auto-pass system context", {
+                    tool: event.toolName,
+                    sessionKey,
+                });
+                return undefined;
+            }
             // 1) permanent allow-always grant
-            if (config.rememberAllowAlways &&
+            if (sessionKey &&
+                config.rememberAllowAlways &&
                 decision.rule &&
-                allowAlways.isGranted(decision.rule.id, event.toolName)) {
+                allowAlways.isGranted(sessionKey, decision.rule.id, event.toolName)) {
                 log.debug("human-gate: allow-always grant hit", {
                     rule: decision.rule.id,
                     tool: event.toolName,
@@ -216,8 +221,9 @@ export default definePluginEntry({
             // 2) approval window (turn / time scoped) — suppresses popup fatigue
             const win = config.approvalWindow;
             const now = Date.now();
-            if (!approvalWindow.bypasses(win, decision) &&
-                approvalWindow.isOpen(win, event.toolName, ctx.runId, now)) {
+            if (sessionKey &&
+                !approvalWindow.bypasses(win, decision) &&
+                approvalWindow.isOpen(win, sessionKey, event.toolName, ctx.runId, now)) {
                 log.debug("human-gate: approval-window auto-pass", {
                     tool: event.toolName,
                     mode: win.mode,
@@ -236,29 +242,53 @@ export default definePluginEntry({
                     timeoutMs: decision.timeoutMs,
                     allowedDecisions: decision.allowedDecisions,
                     pluginId: PLUGIN_ID,
-                    onResolution: (res) => {
-                        // Any approval opens the window for subsequent same-class calls.
-                        if ((res === "allow-once" || res === "allow-always") &&
-                            !approvalWindow.bypasses(win, decision)) {
-                            approvalWindow.open(win, event.toolName, ctx.runId, Date.now());
-                            log.info("human-gate: approval window opened", {
-                                mode: win.mode,
-                                match: win.match,
-                                runId: ctx.runId,
-                            });
+                    onResolution: async (res) => {
+                        try {
+                            // Session state is never shared or remembered without a trusted
+                            // session key. The approved current call still proceeds.
+                            if (!sessionKey) {
+                                log.warn("human-gate: approval resolved without sessionKey; not persisting state", {
+                                    decision: res,
+                                    tool: event.toolName,
+                                });
+                                return;
+                            }
+                            // Any approval opens the per-session window for subsequent
+                            // matching calls.
+                            if ((res === "allow-once" || res === "allow-always") &&
+                                !approvalWindow.bypasses(win, decision)) {
+                                await approvalWindow.open(win, sessionKey, event.toolName, ctx.runId, Date.now());
+                                log.info("human-gate: approval window opened", {
+                                    mode: win.mode,
+                                    match: win.match,
+                                    runId: ctx.runId,
+                                    sessionId: ctx.sessionId,
+                                });
+                            }
+                            if (res === "allow-always" && decision.rule && config.rememberAllowAlways) {
+                                await allowAlways.grant(sessionKey, decision.rule.id, event.toolName);
+                                log.info("human-gate: allow-always granted", {
+                                    key: allowAlwaysKey(decision.rule.id, event.toolName),
+                                    sessionId: ctx.sessionId,
+                                });
+                            }
+                            else {
+                                log.info("human-gate: approval resolved", {
+                                    decision: res,
+                                    tool: event.toolName,
+                                    rule: decision.rule?.id,
+                                });
+                            }
                         }
-                        if (res === "allow-always" && decision.rule && config.rememberAllowAlways) {
-                            allowAlways.grant(decision.rule.id, event.toolName);
-                            log.info("human-gate: allow-always granted", {
-                                key: allowAlwaysKey(decision.rule.id, event.toolName),
-                                sessionId: ctx.sessionId,
-                            });
-                        }
-                        else {
-                            log.info("human-gate: approval resolved", {
+                        catch (err) {
+                            // State persistence failure must not create a wider grant. The
+                            // approved current call may continue, but subsequent calls will
+                            // prompt again because no state was recorded.
+                            log.error("human-gate: failed to persist approval state", {
+                                error: String(err),
                                 decision: res,
                                 tool: event.toolName,
-                                rule: decision.rule?.id,
+                                sessionId: ctx.sessionId,
                             });
                         }
                     },

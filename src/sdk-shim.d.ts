@@ -25,6 +25,53 @@ declare module "typebox" {
 }
 
 declare module "openclaw/plugin-sdk/plugin-entry" {
+  export type PluginJsonValue =
+    | null
+    | boolean
+    | number
+    | string
+    | PluginJsonValue[]
+    | { [key: string]: PluginJsonValue };
+
+  export interface PluginSessionExtensionRegistration {
+    namespace: string;
+    description: string;
+  }
+
+  export interface SessionEntry {
+    pluginExtensions?: Record<string, Record<string, PluginJsonValue>>;
+  }
+
+  export interface PluginSessionPatchApi {
+    getSessionEntry(params: {
+      sessionKey: string;
+      readConsistency?: "latest";
+    }): SessionEntry | undefined;
+    patchSessionEntry(params: {
+      cfg: unknown;
+      sessionKey: string;
+      readConsistency?: "latest";
+      preserveActivity?: boolean;
+      update: (
+        entry: SessionEntry,
+        context: { existingEntry?: SessionEntry },
+      ) => Promise<Partial<SessionEntry> | null> | Partial<SessionEntry> | null;
+    }): Promise<SessionEntry | null>;
+  }
+
+  export interface PluginRuntime {
+    agent: {
+      session: PluginSessionPatchApi;
+    };
+  }
+
+  export interface PluginHookToolContext {
+    getSessionExtension?: (namespace: string) => PluginJsonValue | undefined;
+  }
+
+  export interface OpenClawConfig {
+    [key: string]: unknown;
+  }
   export type ApprovalSeverity = "info" | "warning" | "critical";
   export type ApprovalResolution =
     | "allow-once"
@@ -64,12 +111,9 @@ declare module "openclaw/plugin-sdk/plugin-entry" {
     derivedPaths?: string[];
     runId?: string;
     toolCallId?: string;
-    context?: {
-      pluginConfig?: unknown;
-    };
   }
 
-  export interface ToolCallHookContext {
+  export interface ToolCallHookContext extends PluginHookToolContext {
     agentId?: string;
     sessionKey?: string;
     sessionId?: string;
@@ -86,17 +130,8 @@ declare module "openclaw/plugin-sdk/plugin-entry" {
     };
   }
 
-  export interface SessionExtensionHandle<T> {
-    get(): T | undefined;
-    set(value: T): void;
-    update(fn: (current: T | undefined) => T): void;
-  }
-
   export interface SessionStateApi {
-    registerSessionExtension<T>(opts: {
-      id: string;
-      defaultValue?: T;
-    }): SessionExtensionHandle<T>;
+    registerSessionExtension(opts: PluginSessionExtensionRegistration): void;
   }
 
   export interface SessionWorkflowApi {
@@ -157,16 +192,19 @@ declare module "openclaw/plugin-sdk/plugin-entry" {
   }
 
   export interface OpenClawPluginApi {
-    on<E = BeforeToolCallEvent, C = ToolCallHookContext>(
+    on(
       name: string,
       handler: (
-        event: E,
-        ctx: C,
+        event: BeforeToolCallEvent,
+        ctx: ToolCallHookContext,
       ) => Promise<BeforeToolCallResult | void> | BeforeToolCallResult | void,
       opts?: { priority?: number; timeoutMs?: number },
     ): void;
     registerTool(tool: AnyAgentTool, opts?: OpenClawPluginToolOptions): void;
     session: SessionApi;
+    runtime: PluginRuntime;
+    config: OpenClawConfig;
+    pluginConfig?: Record<string, unknown>;
     logger: Logger;
   }
 

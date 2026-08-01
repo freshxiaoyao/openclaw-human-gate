@@ -41,7 +41,7 @@ import {
   askDetails,
 } from "./types.js";
 import { resolveConfig } from "./config.js";
-import { evaluatePolicy, isAutoPassContext } from "./policy.js";
+import { evaluatePolicy } from "./policy.js";
 import { type AllowAlwaysState, AllowAlwaysStore } from "./state.js";
 import { type WindowState, ApprovalWindowStore } from "./window.js";
 
@@ -262,6 +262,14 @@ export default definePluginEntry({
         if (event.toolName === ASK_TOOL_NAME) return undefined;
 
         const sessionKey = ctx.sessionKey ?? "";
+        if (config.autoPassSessionKeys.some((p) => p && sessionKey.includes(p))) {
+          log.debug("human-gate: auto-pass system context", {
+            tool: event.toolName,
+            sessionKey,
+          });
+          return undefined;
+        }
+
         const decision = evaluatePolicy(event.toolName, event.toolKind, config);
 
         log.debug("human-gate: evaluated", {
@@ -276,8 +284,6 @@ export default definePluginEntry({
           return undefined;
         }
 
-        // block is unconditional: a tool the operator explicitly banned must
-        // never run, even in an unattended cron/heartbeat context.
         if (decision.mode === "block") {
           const blockReason = decision.reason;
           log.warn("human-gate: blocking tool call", {
@@ -292,21 +298,6 @@ export default definePluginEntry({
         }
 
         // decision.mode === "require-approval"
-
-        // Unattended contexts (cron / heartbeat / subagent) have no human at
-        // the popup, so skip the approval prompt — but ONLY the prompt.
-        // `block` above still applies: autoPass exempts require-approval,
-        // never user-forbidden tools.
-        if (
-          sessionKey &&
-          isAutoPassContext(sessionKey, config.autoPassSessionKeys)
-        ) {
-          log.debug("human-gate: auto-pass system context", {
-            tool: event.toolName,
-            sessionKey,
-          });
-          return undefined;
-        }
         // 1) permanent allow-always grant
         if (
           sessionKey &&

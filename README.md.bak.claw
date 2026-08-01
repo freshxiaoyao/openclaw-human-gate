@@ -91,26 +91,19 @@ rules + `defaultMode`.
 
 Scheduled runs (cron jobs, heartbeat) have no human at the keyboard, so an
 approval prompt would stall them indefinitely. By default the gate
-**auto-passes approval prompts** in sessions whose key contains a matching
-`:`-delimited segment — `:cron:` or `:heartbeat` (cron isolated runs and
-heartbeat isolated runs — enable
+**auto-passes** any tool call whose session key contains `:cron:` or
+`:heartbeat` (cron isolated runs and heartbeat isolated runs — enable
 `agents.defaults.heartbeat.isolatedSession: true` so heartbeat runs get their
 own `<session>:heartbeat` key):
 
 ```json5
 {
-  autoPassSessionKeys: [":cron:", ":heartbeat"], // exact session-key segments that skip the prompt
+  autoPassSessionKeys: [":cron:", ":heartbeat"], // session-key substrings that skip the gate
 }
 ```
 
-- Auto-pass exempts **only the approval prompt** (`require-approval` calls
-  proceed without waiting). **`block` rules are still enforced** — a tool the
-  operator explicitly banned never runs, even in an unattended context.
-- Matching is **exact per `:`-delimited segment**, not substring: `:cron:`
-  matches `agent:main:cron:run-1` but not `agent:x:cronx:`. Keys may be
-  written with or without colons (`":cron:"`, `":heartbeat"`, `"subagent"`
-  all work); a bare value matches only a standalone segment.
-- Add your own segments (e.g. `:subagent:`) to auto-pass other run kinds;
+- Matched calls bypass policy evaluation entirely (no prompt, no block).
+- Add your own substrings (e.g. `:subagent:`) to auto-pass other run kinds;
   remove the defaults to gate everything again.
 - Regular interactive sessions never match these, so approvals still apply
   when a human is present.

@@ -1,1 +1,1 @@
-{"version":3,"file":"in-memory-handle.d.ts","sourceRoot":"","sources":["../src/in-memory-handle.ts"],"names":[],"mappings":"AAAA;;;;GAIG;AAEH,OAAO,KAAK,EAAE,sBAAsB,EAAE,MAAM,kCAAkC,CAAC;AAE/E,wBAAgB,oBAAoB,CAAC,CAAC,EACpC,YAAY,CAAC,EAAE,CAAC,GACf,sBAAsB,CAAC,CAAC,CAAC,CAa3B"}
+{"version":3,"file":"in-memory-handle.d.ts","sourceRoot":"","sources":["../src/in-memory-handle.ts"],"names":[],"mappings":"AAAA;;;;;;GAMG;AACH,OAAO,EAAE,CAAC"}

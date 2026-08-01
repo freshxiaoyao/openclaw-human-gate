@@ -1,59 +1,38 @@
-/**
- * Per-session allow-always memory.
- *
- * When a human picks "allow-always" for a (rule, tool) pair, we record it in a
- * plugin-owned session extension so the same combination is auto-approved for
- * the rest of the session. Falls back to pure in-memory storage when the
- * session extension is unavailable (e.g. older OpenClaw runtimes).
- */
+/** Per-session allow-always state backed by OpenClaw session extensions. */
 import { allowAlwaysKey } from "./types.js";
+function normalizeState(value) {
+    if (!value || typeof value !== "object" || !value.grants || typeof value.grants !== "object") {
+        return { grants: {} };
+    }
+    return { grants: { ...value.grants } };
+}
 export class AllowAlwaysStore {
-    handle;
-    /** In-memory fallback when session extension is unavailable. */
-    memory = { grants: {} };
-    constructor(handle) {
-        this.handle = handle ?? null;
+    read;
+    update;
+    constructor(read, update) {
+        this.read = read;
+        this.update = update;
     }
-    state() {
-        if (!this.handle)
-            return this.memory;
-        try {
-            return this.handle.get() ?? this.memory;
-        }
-        catch {
-            return this.memory;
-        }
-    }
-    write(state) {
-        if (!this.handle) {
-            this.memory.grants = state.grants;
-            return;
-        }
-        try {
-            this.handle.set(state);
-        }
-        catch {
-            this.memory.grants = state.grants;
-        }
-    }
-    isGranted(ruleId, toolName) {
-        const state = this.state();
+    isGranted(sessionKey, ruleId, toolName) {
+        const state = normalizeState(this.read(sessionKey));
         return Boolean(state.grants[allowAlwaysKey(ruleId, toolName)]);
     }
-    grant(ruleId, toolName) {
-        const current = this.state();
-        const next = { grants: { ...current.grants } };
-        next.grants[allowAlwaysKey(ruleId, toolName)] = new Date().toISOString();
-        this.write(next);
+    async grant(sessionKey, ruleId, toolName) {
+        await this.update(sessionKey, (current) => {
+            const next = normalizeState(current);
+            next.grants[allowAlwaysKey(ruleId, toolName)] = new Date().toISOString();
+            return next;
+        });
     }
-    revoke(ruleId, toolName) {
-        const current = this.state();
-        const next = { grants: { ...current.grants } };
-        delete next.grants[allowAlwaysKey(ruleId, toolName)];
-        this.write(next);
+    async revoke(sessionKey, ruleId, toolName) {
+        await this.update(sessionKey, (current) => {
+            const next = normalizeState(current);
+            delete next.grants[allowAlwaysKey(ruleId, toolName)];
+            return next;
+        });
     }
-    snapshot() {
-        return this.state();
+    snapshot(sessionKey) {
+        return normalizeState(this.read(sessionKey));
     }
 }
 //# sourceMappingURL=state.js.map
