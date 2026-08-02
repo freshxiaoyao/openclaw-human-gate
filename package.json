@@ -1,6 +1,6 @@
 {
   "name": "openclaw-human-gate",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "Human-in-the-loop approval middleware for OpenClaw. Intercepts tool execution via before_tool_call and routes destructive calls through the built-in approval flow (TUI / Control UI / chat).",
   "type": "module",
   "license": "MIT",
