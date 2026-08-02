@@ -166,6 +166,7 @@ Requires OpenClaw `>= 2026.7.1` (Node 22.22.3+ / 24.15+ / 25.9+).
 
 > Screenshots go here — approval prompt in the Control UI / TUI, and an example
 > `human_gate_ask` question in chat. (TODO: add captures)
+![alt text](image.png)
 
 ## Build
 
