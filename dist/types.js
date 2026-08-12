@@ -11,6 +11,23 @@ export const DEFAULT_CONFIG = {
     defaultTimeoutMs: 300_000,
     rememberAllowAlways: true,
     useClassifiers: true,
+    semanticAnalysis: {
+        enabled: true,
+        maxCommandLength: 16_384,
+        maxWrapperDepth: 3,
+        maxFindings: 8,
+    },
+    previews: {
+        enabled: true,
+        maxDescriptionChars: 512,
+        maxSectionChars: 220,
+        maxLines: 12,
+        maxFiles: 4,
+        redactSecrets: true,
+    },
+    unattendedPolicy: {
+        critical: "block",
+    },
     approvalWindow: {
         mode: "turn",
         ttlMs: 300_000,

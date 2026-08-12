@@ -4,13 +4,14 @@
  * Strategy:
  *  - Register a `before_tool_call` hook (priority 60, after host-trusted
  *    policies but before most observation hooks).
- *  - For each tool call, evaluate the policy (user rules → built-in destructive
- *    toolKinds → name-pattern classifier → defaultMode).
+ *  - Snapshot params, evaluate the base policy, then run upgrade-only semantic
+ *    analyzers before any auto/grant/window decision.
  *  - auto -> pass through; block -> block with reason; require-approval
  *    -> return requireApproval, which pauses the agent run and pushes the
  *    request to every approval surface (TUI / Control UI / chat /approve).
  *  - On allow-always resolution, record a per-session grant so subsequent
- *    matching calls skip the prompt.
+ *    matching non-critical calls skip the prompt.
+ *  - Build bounded, redacted previews through provider + presenter layers.
  *
  * Ask User tool (Claude Code-style chat prompt):
  *  - Registers `human_gate_ask` so the model can ask a structured question when
@@ -25,6 +26,7 @@
  * handled by OpenClaw's Gateway plugin.approval.* flow. This plugin never
  * talks to the TUI directly.
  */
-declare const _default: unknown;
-export default _default;
+import { type OpenClawPluginDefinition } from "openclaw/plugin-sdk/plugin-entry";
+declare const pluginEntry: OpenClawPluginDefinition;
+export default pluginEntry;
 //# sourceMappingURL=index.d.ts.map

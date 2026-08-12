@@ -16,12 +16,55 @@ function resolveWindowConfig(raw) {
         : d.bypassCritical;
     return { mode, match, ttlMs, bypassCritical };
 }
+function clampInteger(value, fallback, min, max) {
+    if (typeof value !== "number" || !Number.isFinite(value))
+        return fallback;
+    return Math.min(Math.max(Math.trunc(value), min), max);
+}
+function resolveSemanticAnalysis(raw) {
+    const d = DEFAULT_CONFIG.semanticAnalysis;
+    if (!isObject(raw))
+        return { ...d };
+    return {
+        enabled: typeof raw.enabled === "boolean" ? raw.enabled : d.enabled,
+        maxCommandLength: clampInteger(raw.maxCommandLength, d.maxCommandLength, 1_024, 65_536),
+        maxWrapperDepth: clampInteger(raw.maxWrapperDepth, d.maxWrapperDepth, 0, 5),
+        maxFindings: clampInteger(raw.maxFindings, d.maxFindings, 1, 32),
+    };
+}
+function resolvePreviews(raw) {
+    const d = DEFAULT_CONFIG.previews;
+    if (!isObject(raw))
+        return { ...d };
+    return {
+        enabled: typeof raw.enabled === "boolean" ? raw.enabled : d.enabled,
+        // The host contract caps this at 512. Accept smaller budgets, never larger.
+        maxDescriptionChars: clampInteger(raw.maxDescriptionChars, d.maxDescriptionChars, 256, 512),
+        maxSectionChars: clampInteger(raw.maxSectionChars, d.maxSectionChars, 80, 360),
+        maxLines: clampInteger(raw.maxLines, d.maxLines, 1, 40),
+        maxFiles: clampInteger(raw.maxFiles, d.maxFiles, 1, 10),
+        redactSecrets: typeof raw.redactSecrets === "boolean" ? raw.redactSecrets : d.redactSecrets,
+    };
+}
+function resolveUnattendedPolicy(raw) {
+    const d = DEFAULT_CONFIG.unattendedPolicy;
+    if (!isObject(raw))
+        return { ...d };
+    return {
+        critical: raw.critical === "auto" || raw.critical === "block"
+            ? raw.critical
+            : d.critical,
+    };
+}
 /** Merge validated plugin configuration over the built-in defaults. */
 export function resolveConfig(pluginConfig) {
     if (!isObject(pluginConfig)) {
         return {
             ...DEFAULT_CONFIG,
             approvalWindow: { ...DEFAULT_CONFIG.approvalWindow },
+            semanticAnalysis: { ...DEFAULT_CONFIG.semanticAnalysis },
+            previews: { ...DEFAULT_CONFIG.previews },
+            unattendedPolicy: { ...DEFAULT_CONFIG.unattendedPolicy },
             rules: [...DEFAULT_CONFIG.rules],
             autoPassSessionKeys: [...DEFAULT_CONFIG.autoPassSessionKeys],
         };
@@ -46,6 +89,9 @@ export function resolveConfig(pluginConfig) {
         useClassifiers: typeof pluginConfig.useClassifiers === "boolean"
             ? pluginConfig.useClassifiers
             : DEFAULT_CONFIG.useClassifiers,
+        semanticAnalysis: resolveSemanticAnalysis(pluginConfig.semanticAnalysis),
+        previews: resolvePreviews(pluginConfig.previews),
+        unattendedPolicy: resolveUnattendedPolicy(pluginConfig.unattendedPolicy),
         approvalWindow: resolveWindowConfig(pluginConfig.approvalWindow),
         rules: Array.isArray(pluginConfig.rules)
             ? pluginConfig.rules

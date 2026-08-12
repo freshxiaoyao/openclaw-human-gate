@@ -43,10 +43,18 @@ its own terminal UI; it reuses OpenClaw's.
 - **Approval window** — approving one destructive call auto-passes matching
   calls for the rest of the turn (or a time box), so multi-step refactors
   don't prompt once per file.
+- **Upgrade-only semantic analysis** — shell and Code Mode parameters are
+  inspected before approval. Remote pipe-to-shell, recursive forced deletion,
+  force pushes, destructive infrastructure operations, production deployment,
+  encoded execution, and likely credential exfiltration are promoted to
+  `critical`. Semantic analysis never downgrades a policy decision.
+- **Content-aware approval previews** — command/code, write, edit, and
+  `apply_patch` inputs receive bounded previews. Secrets, ANSI controls, and
+  bidirectional Unicode controls are sanitized before display.
 - **`allow-always` per session** — grant once, skip re-prompting for that
   session.
 - **Auto-pass for cron / heartbeat** — scheduled runs are never blocked on an
-  approval nobody can see.
+  approval nobody can see; critical semantic risks fail immediately by default.
 - **`human_gate_ask` tool** — Claude Code-style "ask the human" for
   clarification or decisions.
 
@@ -91,7 +99,7 @@ rules + `defaultMode`.
 
 Scheduled runs (cron jobs, heartbeat) have no human at the keyboard, so an
 approval prompt would stall them indefinitely. By default the gate
-**auto-passes approval prompts** in sessions whose key contains a matching
+**auto-passes non-critical approval prompts** in sessions whose key contains a matching
 `:`-delimited segment — `:cron:` or `:heartbeat` (cron isolated runs and
 heartbeat isolated runs — enable
 `agents.defaults.heartbeat.isolatedSession: true` so heartbeat runs get their
@@ -106,6 +114,9 @@ own `<session>:heartbeat` key):
 - Auto-pass exempts **only the approval prompt** (`require-approval` calls
   proceed without waiting). **`block` rules are still enforced** — a tool the
   operator explicitly banned never runs, even in an unattended context.
+- Semantically `critical` calls are blocked by default rather than silently
+  executed. Set `unattendedPolicy.critical: "auto"` only to restore the legacy
+  behavior for critical calls.
 - Matching is **exact per `:`-delimited segment**, not substring: `:cron:`
   matches `agent:main:cron:run-1` but not `agent:x:cronx:`. Keys may be
   written with or without colons (`":cron:"`, `":heartbeat"`, `"subagent"`
@@ -144,6 +155,55 @@ allow-always). `deny` / `timeout` / `cancelled` do not open it. It is stored
 per session. This is separate from `allow-always`, which is a permanent
 per-(rule, tool) grant for the whole session.
 
+Semantic `critical` calls and calls whose input could only be analyzed
+partially bypass both approval windows and earlier `allow-always` grants. A
+critical approval does not offer `allow-always`.
+
+## Parameter-aware semantic analysis
+
+The built-in analyzer registry runs after the base tool policy and before any
+auto, unattended, remembered-grant, or approval-window decision. The initial
+release is deliberately **upgrade-only**: analysis may require approval or
+raise severity, but it never turns an approved/gated call into an automatic
+pass.
+
+The shell analyzer uses a quote-aware scanner for POSIX shell, PowerShell, and
+CMD operators. It does not execute commands, expand variables, resolve aliases,
+or read files. Code Mode has a separate analyzer because its `command` field is
+JavaScript/TypeScript source, not a shell command.
+
+```json5
+semanticAnalysis: {
+  enabled: true,
+  maxCommandLength: 16384,
+  maxWrapperDepth: 3,
+  maxFindings: 8
+},
+unattendedPolicy: {
+  critical: "block" // "block" | "auto"
+}
+```
+
+Analyzer findings use stable IDs and are combined monotonically. A failed
+analyzer requires approval and disables window reuse instead of failing open.
+
+## Approval previews
+
+Approval descriptions are limited by OpenClaw to 512 characters, so Human Gate
+shows a prioritized excerpt rather than pretending to provide a complete diff:
+
+- `exec` and Code Mode: command or code excerpt;
+- write tools: content size, line count, and leading excerpt;
+- edit tools: first old → new replacement and replacement count;
+- `apply_patch`: file and line counts plus a bounded patch excerpt.
+
+All preview content is treated as untrusted input. Secret-like assignments,
+Bearer tokens, JWTs, private keys, ANSI escapes, control characters, and bidi
+controls are removed or marked before the final hard length limit is applied.
+Human Gate snapshots the parameters before analysis and returns that isolated
+snapshot with the approval result, binding the approved preview to the input
+handed back to the host.
+
 ## Install
 
 ```bash
@@ -154,7 +214,7 @@ openclaw plugins install openclaw-human-gate
 npm pack --pack-destination /tmp
 # uninstall first if an older version is installed, then install the new pack
 openclaw plugins uninstall human-gate
-openclaw plugins install npm-pack:/tmp/openclaw-human-gate-0.1.3.tgz
+openclaw plugins install npm-pack:/tmp/openclaw-human-gate-0.2.0.tgz
 
 # inspect
 openclaw plugins inspect human-gate --runtime --json
@@ -196,6 +256,23 @@ destructive toolKinds → name-token classifier → `defaultMode`. See
           defaultTimeoutMs: 300000,
           rememberAllowAlways: true,
           useClassifiers: true,
+          semanticAnalysis: {
+            enabled: true,
+            maxCommandLength: 16384,
+            maxWrapperDepth: 3,
+            maxFindings: 8
+          },
+          previews: {
+            enabled: true,
+            maxDescriptionChars: 512,
+            maxSectionChars: 220,
+            maxLines: 12,
+            maxFiles: 4,
+            redactSecrets: true
+          },
+          unattendedPolicy: {
+            critical: "block"
+          },
           approvalWindow: {
             mode: "turn",
             match: "same-tool",
@@ -282,11 +359,8 @@ channel (e.g. Slack DM), set the `approvals.plugin` block in OpenClaw config:
 }
 ```
 
-The approval popup shows a bounded summary: tool name/kind, up to four derived
-paths, selected safe scalar parameters (`command`, `file_path`, `url`,
-`environment`, etc.), policy reason, and rule id. It never dumps the complete
-params object, reducing accidental secret exposure and keeping the prompt
-readable.
+The approval popup shows a bounded, sanitized semantic summary and a selected
+command/code/file-mutation preview. It never dumps the complete params object.
 
 In a chat channel, resolve with `/approve <id> allow-once|allow-always|deny`.
 
@@ -319,14 +393,19 @@ plugin-callable TUI selector API. Chat is the selector.
 - `src/index.ts` — entry point; registers the approval `before_tool_call` hook,
   an `after_tool_call` observation hook, and the `human_gate_ask` tool.
 - `src/policy.ts` — rule-matching engine (pure).
+- `src/analysis/` — analyzer registry, quote-aware shell scanner, command and
+  Code Mode analyzers, and upgrade-only decision reducer.
+- `src/preview/` — extensible preview providers, sanitization, redaction, and
+  the OpenClaw text presenter.
 - `src/config.ts` — resolves `api.pluginConfig` over built-in defaults.
 - `src/state.ts` — per-session allow-always store backed by session extensions.
 - `src/window.ts` — per-session approval window backed by session extensions.
 - `src/in-memory-handle.ts` — deprecated compatibility placeholder; no process-global session state is used.
 - `src/types.ts` — plugin config, rule types, and ask-tool parsing/formatting.
-- `src/sdk-shim.d.ts` — structural types for the OpenClaw SDK surfaces used
-  (mirrors the documented contract; real types come from `openclaw/plugin-sdk/*`
-  in a source checkout).
+- `docs/architecture.md` — trust boundaries, extension contracts, invariants,
+  known limitations, and the next architecture increments.
+- The build uses the real `openclaw/plugin-sdk/*` declarations supplied by the
+  peer dependency; no local SDK shim can mask compatibility drift.
 
 ## Notes
 

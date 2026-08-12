@@ -4,13 +4,14 @@
  * Strategy:
  *  - Register a `before_tool_call` hook (priority 60, after host-trusted
  *    policies but before most observation hooks).
- *  - For each tool call, evaluate the policy (user rules → built-in destructive
- *    toolKinds → name-pattern classifier → defaultMode).
+ *  - Snapshot params, evaluate the base policy, then run upgrade-only semantic
+ *    analyzers before any auto/grant/window decision.
  *  - auto -> pass through; block -> block with reason; require-approval
  *    -> return requireApproval, which pauses the agent run and pushes the
  *    request to every approval surface (TUI / Control UI / chat /approve).
  *  - On allow-always resolution, record a per-session grant so subsequent
- *    matching calls skip the prompt.
+ *    matching non-critical calls skip the prompt.
+ *  - Build bounded, redacted previews through provider + presenter layers.
  *
  * Ask User tool (Claude Code-style chat prompt):
  *  - Registers `human_gate_ask` so the model can ask a structured question when
@@ -30,6 +31,7 @@ import { Type } from "typebox";
 import {
   definePluginEntry,
   type OpenClawPluginApi,
+  type OpenClawPluginDefinition,
   type AnyAgentTool,
   type PluginJsonValue,
 } from "openclaw/plugin-sdk/plugin-entry";
@@ -44,12 +46,22 @@ import { resolveConfig } from "./config.js";
 import { evaluatePolicy, isAutoPassContext } from "./policy.js";
 import { type AllowAlwaysState, AllowAlwaysStore } from "./state.js";
 import { type WindowState, ApprovalWindowStore } from "./window.js";
+import { CommandAnalyzer } from "./analysis/command.js";
+import { CodeModeAnalyzer } from "./analysis/code.js";
+import { reduceDecision } from "./analysis/decision.js";
+import { AnalyzerRegistry } from "./analysis/registry.js";
+import { EMPTY_SEMANTIC_REPORT, type ToolCallContext } from "./analysis/types.js";
+import { ApprovalPresenter } from "./preview/presenter.js";
 
 const PLUGIN_ID = "human-gate";
 const ASK_TOOL_NAME = "human_gate_ask";
 const ALLOW_ALWAYS_NAMESPACE = "allow-always";
 const WINDOW_NAMESPACE = "approval-window";
 const HOOK_PRIORITY = 60;
+
+function logPayload(message: string, details: Record<string, unknown>): string {
+  return `${message} ${JSON.stringify(details)}`;
+}
 
 type ApprovalResolution =
   | "allow-once"
@@ -136,7 +148,6 @@ async function patchExtension<T extends object>(
   update: (current: T) => T,
 ): Promise<void> {
   const patched = await api.runtime.agent.session.patchSessionEntry({
-    cfg: api.config,
     sessionKey,
     readConsistency: "latest",
     preserveActivity: true,
@@ -160,53 +171,18 @@ function truncate(text: string, max: number): string {
   return text.length <= max ? text : `${text.slice(0, Math.max(0, max - 1))}…`;
 }
 
-function compactValue(value: unknown): string | undefined {
-  if (typeof value === "string") {
-    const oneLine = value.replace(/\s+/g, " ").trim();
-    return oneLine ? truncate(oneLine, 160) : undefined;
+function snapshotParams(params: Record<string, unknown>): Record<string, unknown> | undefined {
+  try {
+    const cloned = structuredClone(params);
+    return cloned && typeof cloned === "object" && !Array.isArray(cloned)
+      ? cloned
+      : undefined;
+  } catch {
+    return undefined;
   }
-  if (typeof value === "number" || typeof value === "boolean") {
-    return String(value);
-  }
-  return undefined;
 }
 
-/** Best-effort, bounded summary for the approval UI. Never dumps the entire
- * params object, which could expose secrets or produce unreadable popups. */
-function summarizeParams(params: Record<string, unknown>): string | undefined {
-  const preferred = [
-    "command",
-    "filePath",
-    "file_path",
-    "path",
-    "url",
-    "environment",
-    "target",
-    "name",
-  ];
-  const parts: string[] = [];
-  for (const key of preferred) {
-    const value = compactValue(params[key]);
-    if (value) parts.push(`${key}=${value}`);
-    if (parts.length >= 3) break;
-  }
-  return parts.length > 0 ? truncate(parts.join("; "), 240) : undefined;
-}
-
-function describeToolCall(event: BeforeToolCallEvent, decisionReason: string, ruleId: string): string {
-  const lines = [
-    `Tool: ${event.toolName}${event.toolKind ? ` [${event.toolKind}]` : ""}`,
-  ];
-  if (event.derivedPaths?.length) {
-    lines.push(`Paths: ${truncate(event.derivedPaths.slice(0, 4).join(", "), 180)}`);
-  }
-  const paramSummary = summarizeParams(event.params);
-  if (paramSummary) lines.push(`Input: ${paramSummary}`);
-  lines.push(`Reason: ${decisionReason}`, `Rule: ${ruleId}`);
-  return truncate(lines.join("\n"), 512);
-}
-
-export default definePluginEntry({
+const pluginEntry: OpenClawPluginDefinition = definePluginEntry({
   id: PLUGIN_ID,
   name: "Human Gate",
   description:
@@ -215,6 +191,14 @@ export default definePluginEntry({
     const log = api.logger;
 
     const config: HumanGateConfig = resolveConfig(api.pluginConfig);
+    const analyzerRegistry = new AnalyzerRegistry(
+      [
+        new CodeModeAnalyzer(config.semanticAnalysis),
+        new CommandAnalyzer(config.semanticAnalysis),
+      ],
+      config.semanticAnalysis.maxFindings,
+    );
+    const presenter = new ApprovalPresenter(config.previews);
 
     api.session.state.registerSessionExtension({
       namespace: ALLOW_ALWAYS_NAMESPACE,
@@ -262,15 +246,47 @@ export default definePluginEntry({
         if (event.toolName === ASK_TOOL_NAME) return undefined;
 
         const sessionKey = ctx.sessionKey ?? "";
-        const decision = evaluatePolicy(event.toolName, event.toolKind, config);
+        const baseDecision = evaluatePolicy(event.toolName, event.toolKind, config);
+        // An explicit base block is terminal and needs neither parameter
+        // inspection nor preview generation.
+        if (baseDecision.mode === "block") {
+          const blockReason = baseDecision.reason;
+          log.warn(logPayload("human-gate: blocking tool call", {
+            tool: event.toolName,
+            rule: baseDecision.rule?.id,
+            blockReason,
+          }));
+          return { block: true, blockReason };
+        }
+        const paramsSnapshot = snapshotParams(event.params);
+        if (!paramsSnapshot) {
+          const blockReason = "Human Gate could not safely snapshot tool parameters";
+          log.warn(logPayload("human-gate: blocking unsnapshotable tool params", {
+            tool: event.toolName,
+            sessionId: ctx.sessionId,
+          }));
+          return { block: true, blockReason };
+        }
+        const analysisContext: ToolCallContext = {
+          toolName: event.toolName,
+          toolKind: event.toolKind,
+          toolInputKind: event.toolInputKind,
+          params: paramsSnapshot,
+          derivedPaths: event.derivedPaths ?? [],
+        };
+        const semanticReport = config.semanticAnalysis.enabled
+          ? analyzerRegistry.analyze(analysisContext)
+          : EMPTY_SEMANTIC_REPORT;
+        const decision = reduceDecision(baseDecision, semanticReport);
 
-        log.debug("human-gate: evaluated", {
+        log.debug?.(logPayload("human-gate: evaluated", {
           tool: event.toolName,
           toolKind: event.toolKind,
           mode: decision.mode,
           rule: decision.rule?.id,
+          findings: decision.semanticReport.findings.map((finding) => finding.id),
           sessionId: ctx.sessionId,
-        });
+        }));
 
         if (decision.mode === "auto") {
           return undefined;
@@ -280,11 +296,11 @@ export default definePluginEntry({
         // never run, even in an unattended cron/heartbeat context.
         if (decision.mode === "block") {
           const blockReason = decision.reason;
-          log.warn("human-gate: blocking tool call", {
+          log.warn(logPayload("human-gate: blocking tool call", {
             tool: event.toolName,
             rule: decision.rule?.id,
             blockReason,
-          });
+          }));
           return {
             block: true,
             blockReason,
@@ -301,23 +317,36 @@ export default definePluginEntry({
           sessionKey &&
           isAutoPassContext(sessionKey, config.autoPassSessionKeys)
         ) {
-          log.debug("human-gate: auto-pass system context", {
+          if (
+            decision.severity === "critical" &&
+            config.unattendedPolicy.critical === "block"
+          ) {
+            const blockReason = `Critical unattended tool call blocked: ${decision.reason}`;
+            log.warn(logPayload("human-gate: blocking critical unattended call", {
+              tool: event.toolName,
+              findings: decision.semanticReport.findings.map((finding) => finding.id),
+              sessionKey,
+            }));
+            return { block: true, blockReason };
+          }
+          log.debug?.(logPayload("human-gate: auto-pass system context", {
             tool: event.toolName,
             sessionKey,
-          });
+          }));
           return undefined;
         }
         // 1) permanent allow-always grant
         if (
           sessionKey &&
+          decision.windowEligible &&
           config.rememberAllowAlways &&
           decision.rule &&
           allowAlways.isGranted(sessionKey, decision.rule.id, event.toolName)
         ) {
-          log.debug("human-gate: allow-always grant hit", {
+          log.debug?.(logPayload("human-gate: allow-always grant hit", {
             rule: decision.rule.id,
             tool: event.toolName,
-          });
+          }));
           return undefined;
         }
 
@@ -326,31 +355,32 @@ export default definePluginEntry({
         const now = Date.now();
         if (
           sessionKey &&
+          decision.windowEligible &&
           !approvalWindow.bypasses(win, decision) &&
           approvalWindow.isOpen(win, sessionKey, event.toolName, ctx.runId, now)
         ) {
-          log.debug("human-gate: approval-window auto-pass", {
+          log.debug?.(logPayload("human-gate: approval-window auto-pass", {
             tool: event.toolName,
             mode: win.mode,
             match: win.match,
             runId: ctx.runId,
-          });
+          }));
           return undefined;
         }
 
         const title = truncate(`Approve ${event.toolName}`, 80);
-        const description = describeToolCall(
-          event,
-          decision.reason,
-          decision.rule?.id ?? "default",
-        );
+        const description = presenter.describe(analysisContext, decision);
 
         return {
+          // Bind the approval to the exact params that were analyzed and shown.
+          params: paramsSnapshot,
           requireApproval: {
             title,
             description,
             severity: decision.severity,
             timeoutMs: decision.timeoutMs,
+            timeoutBehavior: "deny" as const,
+            timeoutReason: "Human Gate approval timed out",
             allowedDecisions: decision.allowedDecisions,
             pluginId: PLUGIN_ID,
             onResolution: async (res: ApprovalResolution) => {
@@ -358,16 +388,17 @@ export default definePluginEntry({
                 // Session state is never shared or remembered without a trusted
                 // session key. The approved current call still proceeds.
                 if (!sessionKey) {
-                  log.warn("human-gate: approval resolved without sessionKey; not persisting state", {
+                  log.warn(logPayload("human-gate: approval resolved without sessionKey; not persisting state", {
                     decision: res,
                     tool: event.toolName,
-                  });
+                  }));
                   return;
                 }
                 // Any approval opens the per-session window for subsequent
                 // matching calls.
                 if (
                   (res === "allow-once" || res === "allow-always") &&
+                  decision.windowEligible &&
                   !approvalWindow.bypasses(win, decision)
                 ) {
                   await approvalWindow.open(
@@ -377,40 +408,45 @@ export default definePluginEntry({
                     ctx.runId,
                     Date.now(),
                   );
-                  log.info("human-gate: approval window opened", {
+                  log.info(logPayload("human-gate: approval window opened", {
                     mode: win.mode,
                     match: win.match,
                     runId: ctx.runId,
                     sessionId: ctx.sessionId,
-                  });
+                  }));
                 }
-                if (res === "allow-always" && decision.rule && config.rememberAllowAlways) {
+                if (
+                  res === "allow-always" &&
+                  decision.windowEligible &&
+                  decision.rule &&
+                  config.rememberAllowAlways
+                ) {
                   await allowAlways.grant(
                     sessionKey,
                     decision.rule.id,
                     event.toolName,
                   );
-                  log.info("human-gate: allow-always granted", {
+                  log.info(logPayload("human-gate: allow-always granted", {
                     key: allowAlwaysKey(decision.rule.id, event.toolName),
                     sessionId: ctx.sessionId,
-                  });
+                  }));
                 } else {
-                  log.info("human-gate: approval resolved", {
+                  log.info(logPayload("human-gate: approval resolved", {
                     decision: res,
                     tool: event.toolName,
                     rule: decision.rule?.id,
-                  });
+                  }));
                 }
               } catch (err) {
                 // State persistence failure must not create a wider grant. The
                 // approved current call may continue, but subsequent calls will
                 // prompt again because no state was recorded.
-                log.error("human-gate: failed to persist approval state", {
+                log.error(logPayload("human-gate: failed to persist approval state", {
                   error: String(err),
                   decision: res,
                   tool: event.toolName,
                   sessionId: ctx.sessionId,
-                });
+                }));
               }
             },
           },
@@ -429,11 +465,11 @@ export default definePluginEntry({
         durationMs?: number;
       }) => {
         if (event.error) {
-          log.warn("human-gate: tool errored after gate", {
+          log.warn(logPayload("human-gate: tool errored after gate", {
             tool: event.toolName,
             toolCallId: event.toolCallId,
             error: String(event.error),
-          });
+          }));
         }
       },
       { priority: 40, timeoutMs: 10_000 },
@@ -446,6 +482,7 @@ export default definePluginEntry({
     // reply in the next turn. This is the Claude Code ask pattern.
     const askTool: AnyAgentTool = {
       name: ASK_TOOL_NAME,
+      label: "Ask Human",
       description:
         "Ask the human operator a structured question when you need " +
         "clarification, a decision, or more context. Use this when the " +
@@ -489,24 +526,15 @@ export default definePluginEntry({
         },
         { additionalProperties: false },
       ),
-      outputSchema: Type.Object(
-        {
-          question: Type.String(),
-          choices: Type.Array(Type.String()),
-          allowFreeText: Type.Boolean(),
-          context: Type.Optional(Type.String()),
-        },
-        { additionalProperties: false },
-      ),
       async execute(_callId: string, params: Record<string, unknown>) {
         const p = parseAskInput(params);
         const details = askDetails(p);
 
-        log.info("human-gate: ask tool executed", {
-          question: p.question.slice(0, 120),
+        log.info(logPayload("human-gate: ask tool executed", {
+          questionLength: p.question.length,
           choiceCount: details.choices.length,
           allowFreeText: details.allowFreeText,
-        });
+        }));
 
         return {
           content: [{ type: "text", text: formatAskForChat(p) }],
@@ -516,9 +544,11 @@ export default definePluginEntry({
     };
     api.registerTool(askTool, { optional: true });
 
-    log.info("human-gate: registered approval gate + ask tool", {
+    log.info(logPayload("human-gate: registered approval gate + ask tool", {
       hookPriority: HOOK_PRIORITY,
       askTool: ASK_TOOL_NAME,
-    });
+    }));
   },
 });
+
+export default pluginEntry;

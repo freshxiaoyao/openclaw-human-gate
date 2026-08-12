@@ -67,7 +67,7 @@ function ruleMatches(rule, toolName, toolKind) {
     }
     return true;
 }
-function resolveDecision(rule, config) {
+function resolveDecision(rule, config, source) {
     const severity = rule.severity ?? config.defaultSeverity;
     const timeoutMs = rule.timeoutMs ?? config.defaultTimeoutMs;
     const allowedDecisions = rule.allowedDecisions ?? [
@@ -77,6 +77,7 @@ function resolveDecision(rule, config) {
     ];
     return {
         mode: rule.mode,
+        source,
         rule,
         severity,
         timeoutMs: clampTimeout(timeoutMs),
@@ -119,6 +120,7 @@ function classifyByName(toolName, toolKind, config) {
 function autoDecision(ruleId, reason) {
     return {
         mode: "auto",
+        source: "classifier",
         severity: "info",
         timeoutMs: 0,
         allowedDecisions: [],
@@ -129,6 +131,7 @@ function autoDecision(ruleId, reason) {
 function requireApprovalDecision(ruleId, reason, config) {
     return {
         mode: "require-approval",
+        source: "classifier",
         severity: config.defaultSeverity,
         timeoutMs: clampTimeout(config.defaultTimeoutMs),
         allowedDecisions: ["allow-once", "allow-always", "deny"],
@@ -140,13 +143,13 @@ export function evaluatePolicy(toolName, toolKind, config) {
     // 1. User rules (explicit override).
     for (const rule of config.rules) {
         if (ruleMatches(rule, toolName, toolKind)) {
-            return resolveDecision(rule, config);
+            return resolveDecision(rule, config, "user");
         }
     }
     // 2. Built-in destructive toolKind rules.
     for (const rule of BUILTIN_DESTRUCTIVE_RULES) {
         if (ruleMatches(rule, toolName, toolKind)) {
-            return resolveDecision(rule, config);
+            return resolveDecision(rule, config, "builtin");
         }
     }
     // 3. Name-token classifier.
@@ -160,6 +163,7 @@ export function evaluatePolicy(toolName, toolKind, config) {
     //    toolName) instead of silently failing to remember.
     return {
         mode: config.defaultMode,
+        source: "default",
         severity: config.defaultSeverity,
         timeoutMs: clampTimeout(config.defaultTimeoutMs),
         allowedDecisions: ["allow-once", "allow-always", "deny"],

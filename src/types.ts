@@ -11,6 +11,8 @@ export type GateMode = "auto" | "require-approval" | "block";
 
 export type GateSeverity = "info" | "warning" | "critical";
 
+export type PolicySource = "user" | "builtin" | "classifier" | "default";
+
 export type ApprovalDecision =
   | "allow-once"
   | "allow-always"
@@ -55,6 +57,13 @@ export interface HumanGateConfig {
    *  listing every tool. Set false to disable classification and rely solely
    *  on explicit rules + defaultMode. */
   useClassifiers: boolean;
+  /** Parameter-aware, upgrade-only analysis. It may tighten a built-in or
+   * fallback decision, but never downgrades one. */
+  semanticAnalysis: SemanticAnalysisConfig;
+  /** Bounded and redacted approval descriptions. */
+  previews: ApprovalPreviewConfig;
+  /** Behavior for critical calls in contexts where nobody can approve. */
+  unattendedPolicy: UnattendedPolicyConfig;
   /** Approval window: after the human approves one destructive call, further
    *  matching calls auto-pass for a turn or a time box, so a multi-step write
    *  task does not prompt once per file. */
@@ -67,6 +76,31 @@ export interface HumanGateConfig {
    *  matches `agent:main:cron:run-1` but not `x:cronx:`). Auto-pass exempts
    *  ONLY require-approval prompts — `block` rules are still enforced. */
   autoPassSessionKeys: string[];
+}
+
+export interface SemanticAnalysisConfig {
+  enabled: boolean;
+  /** Maximum source characters inspected by one analyzer. */
+  maxCommandLength: number;
+  /** Maximum nested shell-wrapper levels inspected (`sh -c`, `cmd /c`, etc.). */
+  maxWrapperDepth: number;
+  /** Maximum findings retained across all analyzers. */
+  maxFindings: number;
+}
+
+export interface ApprovalPreviewConfig {
+  enabled: boolean;
+  /** OpenClaw's plugin approval contract currently caps descriptions at 512. */
+  maxDescriptionChars: number;
+  maxSectionChars: number;
+  maxLines: number;
+  maxFiles: number;
+  redactSecrets: boolean;
+}
+
+export interface UnattendedPolicyConfig {
+  /** Critical calls cannot wait for approval; block is the safe default. */
+  critical: "block" | "auto";
 }
 
 /** Reduces popup fatigue for multi-step write tasks. */
@@ -92,6 +126,23 @@ export const DEFAULT_CONFIG: HumanGateConfig = {
   defaultTimeoutMs: 300_000,
   rememberAllowAlways: true,
   useClassifiers: true,
+  semanticAnalysis: {
+    enabled: true,
+    maxCommandLength: 16_384,
+    maxWrapperDepth: 3,
+    maxFindings: 8,
+  },
+  previews: {
+    enabled: true,
+    maxDescriptionChars: 512,
+    maxSectionChars: 220,
+    maxLines: 12,
+    maxFiles: 4,
+    redactSecrets: true,
+  },
+  unattendedPolicy: {
+    critical: "block",
+  },
   approvalWindow: {
     mode: "turn",
     ttlMs: 300_000,
@@ -174,6 +225,7 @@ export const BUILTIN_DESTRUCTIVE_RULES: GateRule[] = [
 /** Result of evaluating the policy against one tool call. */
 export interface PolicyDecision {
   mode: GateMode;
+  source: PolicySource;
   rule?: GateRule;
   /** Resolved severity/timeout/allowedDecisions (rule overrides config defaults). */
   severity: GateSeverity;

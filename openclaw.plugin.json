@@ -18,8 +18,8 @@
       "defaultMode": {
         "type": "string",
         "enum": ["auto", "require-approval", "block"],
-        "default": "auto",
-        "description": "Fallback decision for a tool that no rule and no classifier matches. Default 'auto' (low friction); set 'require-approval' for a strict shop."
+        "default": "require-approval",
+        "description": "Fallback decision for a tool that no rule and no classifier matches. Defaults to fail-closed approval."
       },
       "defaultSeverity": {
         "type": "string",
@@ -41,6 +41,78 @@
         "type": "boolean",
         "default": true,
         "description": "Run the built-in read-only/destructive classifier after user rules. Reads pass through; writes/exec get gated without listing every tool."
+      },
+      "semanticAnalysis": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "Upgrade-only parameter analysis for shell and Code Mode execution. It can increase severity or require approval, never lower a base decision.",
+        "properties": {
+          "enabled": { "type": "boolean", "default": true },
+          "maxCommandLength": {
+            "type": "integer",
+            "minimum": 1024,
+            "maximum": 65536,
+            "default": 16384
+          },
+          "maxWrapperDepth": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 5,
+            "default": 3
+          },
+          "maxFindings": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 32,
+            "default": 8
+          }
+        }
+      },
+      "previews": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "Bounded, sanitized approval previews for commands and file mutations.",
+        "properties": {
+          "enabled": { "type": "boolean", "default": true },
+          "maxDescriptionChars": {
+            "type": "integer",
+            "minimum": 256,
+            "maximum": 512,
+            "default": 512
+          },
+          "maxSectionChars": {
+            "type": "integer",
+            "minimum": 80,
+            "maximum": 360,
+            "default": 220
+          },
+          "maxLines": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 40,
+            "default": 12
+          },
+          "maxFiles": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 10,
+            "default": 4
+          },
+          "redactSecrets": { "type": "boolean", "default": true }
+        }
+      },
+      "unattendedPolicy": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "Controls calls that cannot be interactively approved in cron/heartbeat contexts.",
+        "properties": {
+          "critical": {
+            "type": "string",
+            "enum": ["block", "auto"],
+            "default": "block",
+            "description": "block is the safe default; auto preserves the legacy unattended behavior for critical calls."
+          }
+        }
       },
       "approvalWindow": {
         "type": "object",
@@ -77,7 +149,7 @@
         "type": "array",
         "items": { "type": "string" },
         "default": [":cron:", ":heartbeat"],
-        "description": "Session key substrings that auto-pass the gate (no human to ask). Cron isolated runs and heartbeat isolated runs by default."
+        "description": "Exact colon-delimited session-key segments that auto-pass non-critical approval prompts. Critical calls follow unattendedPolicy."
       },
       "rules": {
         "type": "array",

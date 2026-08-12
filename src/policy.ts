@@ -87,6 +87,7 @@ function ruleMatches(
 function resolveDecision(
   rule: GateRule,
   config: HumanGateConfig,
+  source: PolicyDecision["source"],
 ): PolicyDecision {
   const severity: GateSeverity = rule.severity ?? config.defaultSeverity;
   const timeoutMs = rule.timeoutMs ?? config.defaultTimeoutMs;
@@ -97,6 +98,7 @@ function resolveDecision(
   ];
   return {
     mode: rule.mode,
+    source,
     rule,
     severity,
     timeoutMs: clampTimeout(timeoutMs),
@@ -154,6 +156,7 @@ function classifyByName(
 function autoDecision(ruleId: string, reason: string): PolicyDecision {
   return {
     mode: "auto",
+    source: "classifier",
     severity: "info",
     timeoutMs: 0,
     allowedDecisions: [],
@@ -169,6 +172,7 @@ function requireApprovalDecision(
 ): PolicyDecision {
   return {
     mode: "require-approval",
+    source: "classifier",
     severity: config.defaultSeverity,
     timeoutMs: clampTimeout(config.defaultTimeoutMs),
     allowedDecisions: ["allow-once", "allow-always", "deny"],
@@ -185,14 +189,14 @@ export function evaluatePolicy(
   // 1. User rules (explicit override).
   for (const rule of config.rules) {
     if (ruleMatches(rule, toolName, toolKind)) {
-      return resolveDecision(rule, config);
+      return resolveDecision(rule, config, "user");
     }
   }
 
   // 2. Built-in destructive toolKind rules.
   for (const rule of BUILTIN_DESTRUCTIVE_RULES) {
     if (ruleMatches(rule, toolName, toolKind)) {
-      return resolveDecision(rule, config);
+      return resolveDecision(rule, config, "builtin");
     }
   }
 
@@ -207,6 +211,7 @@ export function evaluatePolicy(
   //    toolName) instead of silently failing to remember.
   return {
     mode: config.defaultMode,
+    source: "default",
     severity: config.defaultSeverity,
     timeoutMs: clampTimeout(config.defaultTimeoutMs),
     allowedDecisions: ["allow-once", "allow-always", "deny"],

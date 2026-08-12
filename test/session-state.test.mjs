@@ -22,6 +22,9 @@ test("resolveConfig honors api.pluginConfig values", () => {
     defaultMode: "block",
     rememberAllowAlways: false,
     useClassifiers: false,
+    semanticAnalysis: { enabled: false, maxCommandLength: 999999, maxWrapperDepth: 99, maxFindings: 0 },
+    previews: { maxDescriptionChars: 9999, maxLines: 0, redactSecrets: false },
+    unattendedPolicy: { critical: "auto" },
     approvalWindow: { mode: "off", match: "destructive", ttlMs: 1234 },
     autoPassSessionKeys: [],
     rules: [{ id: "deny-all", mode: "block" }],
@@ -30,6 +33,14 @@ test("resolveConfig honors api.pluginConfig values", () => {
   assert.equal(cfg.defaultMode, "block");
   assert.equal(cfg.rememberAllowAlways, false);
   assert.equal(cfg.useClassifiers, false);
+  assert.equal(cfg.semanticAnalysis.enabled, false);
+  assert.equal(cfg.semanticAnalysis.maxCommandLength, 65536);
+  assert.equal(cfg.semanticAnalysis.maxWrapperDepth, 5);
+  assert.equal(cfg.semanticAnalysis.maxFindings, 1);
+  assert.equal(cfg.previews.maxDescriptionChars, 512);
+  assert.equal(cfg.previews.maxLines, 1);
+  assert.equal(cfg.previews.redactSecrets, false);
+  assert.equal(cfg.unattendedPolicy.critical, "auto");
   assert.equal(cfg.approvalWindow.mode, "off");
   assert.equal(cfg.approvalWindow.match, "destructive");
   assert.equal(cfg.approvalWindow.ttlMs, 1234);

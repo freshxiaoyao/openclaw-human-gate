@@ -1,7 +1,7 @@
 {
   "name": "openclaw-human-gate",
-  "version": "0.1.4",
-  "description": "Human-in-the-loop approval middleware for OpenClaw. Intercepts tool execution via before_tool_call and routes destructive calls through the built-in approval flow (TUI / Control UI / chat).",
+  "version": "0.2.0",
+  "description": "Semantic human-in-the-loop approval middleware for OpenClaw with parameter-aware risk analysis and redacted content previews.",
   "type": "module",
   "license": "MIT",
   "keywords": [
@@ -14,9 +14,8 @@
     "gate"
   ],
   "files": [
-    "dist/*.js",
-    "dist/*.d.ts",
-    "dist/*.map",
+    "dist",
+    "docs",
     "openclaw.plugin.json"
   ],
   "repository": {
@@ -32,6 +31,7 @@
   "scripts": {
     "build": "node ./node_modules/typescript/bin/tsc -p tsconfig.json",
     "typecheck": "node ./node_modules/typescript/bin/tsc -p tsconfig.json --noEmit",
+    "check": "npm run typecheck && npm test",
     "test": "npm run build && node --test test/*.test.mjs",
     "prepublishOnly": "npm run build"
   },
