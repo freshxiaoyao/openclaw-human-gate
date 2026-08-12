@@ -148,7 +148,7 @@ const pluginEntry = definePluginEntry({
             if (event.toolName === ASK_TOOL_NAME)
                 return undefined;
             const sessionKey = ctx.sessionKey ?? "";
-            const baseDecision = evaluatePolicy(event.toolName, event.toolKind, config);
+            const baseDecision = evaluatePolicy(event.toolName, event.toolKind, config, event.params);
             // An explicit base block is terminal and needs neither parameter
             // inspection nor preview generation.
             if (baseDecision.mode === "block") {
@@ -180,6 +180,9 @@ const pluginEntry = definePluginEntry({
                 ? analyzerRegistry.analyze(analysisContext)
                 : EMPTY_SEMANTIC_REPORT;
             const decision = reduceDecision(baseDecision, semanticReport);
+            const isParamScopedRule = decision.source === "user" &&
+                decision.rule !== undefined &&
+                Object.prototype.hasOwnProperty.call(decision.rule, "paramMatcher");
             log.debug?.(logPayload("human-gate: evaluated", {
                 tool: event.toolName,
                 toolKind: event.toolKind,
@@ -189,7 +192,10 @@ const pluginEntry = definePluginEntry({
                 sessionId: ctx.sessionId,
             }));
             if (decision.mode === "auto") {
-                return undefined;
+                // A parameter-scoped auto decision is bound to the exact JSON-safe
+                // snapshot that matched. This prevents the host from executing a
+                // subsequently mutated action under an earlier narrow decision.
+                return isParamScopedRule ? { params: paramsSnapshot } : undefined;
             }
             // block is unconditional: a tool the operator explicitly banned must
             // never run, even in an unattended cron/heartbeat context.
@@ -245,6 +251,7 @@ const pluginEntry = definePluginEntry({
             const now = Date.now();
             if (sessionKey &&
                 decision.windowEligible &&
+                !isParamScopedRule &&
                 !approvalWindow.bypasses(win, decision) &&
                 approvalWindow.isOpen(win, sessionKey, event.toolName, ctx.runId, now)) {
                 log.debug?.(logPayload("human-gate: approval-window auto-pass", {
@@ -284,6 +291,7 @@ const pluginEntry = definePluginEntry({
                             // matching calls.
                             if ((res === "allow-once" || res === "allow-always") &&
                                 decision.windowEligible &&
+                                !isParamScopedRule &&
                                 !approvalWindow.bypasses(win, decision)) {
                                 await approvalWindow.open(win, sessionKey, event.toolName, ctx.runId, Date.now());
                                 log.info(logPayload("human-gate: approval window opened", {

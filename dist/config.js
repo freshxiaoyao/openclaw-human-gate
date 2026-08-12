@@ -1,6 +1,11 @@
 import { DEFAULT_CONFIG } from "./types.js";
+import { isValidRuleParamMatcher } from "./policy.js";
 function isObject(v) {
     return typeof v === "object" && v !== null;
+}
+function ownDataValue(object, key) {
+    const descriptor = Object.getOwnPropertyDescriptor(object, key);
+    return descriptor && "value" in descriptor ? descriptor.value : undefined;
 }
 function resolveWindowConfig(raw) {
     const d = DEFAULT_CONFIG.approvalWindow;
@@ -56,6 +61,51 @@ function resolveUnattendedPolicy(raw) {
             : d.critical,
     };
 }
+function cloneParamCondition(condition) {
+    const key = ownDataValue(condition, "key");
+    if (Object.prototype.hasOwnProperty.call(condition, "equals")) {
+        return { key, equals: ownDataValue(condition, "equals") };
+    }
+    if (Object.prototype.hasOwnProperty.call(condition, "in")) {
+        return { key, in: [...ownDataValue(condition, "in")] };
+    }
+    return { key, missing: true };
+}
+function cloneRuleParamMatcher(matcher) {
+    if (Object.prototype.hasOwnProperty.call(matcher, "all")) {
+        const all = ownDataValue(matcher, "all");
+        return { all: all.map(cloneParamCondition) };
+    }
+    const any = ownDataValue(matcher, "any");
+    return { any: any.map(cloneParamCondition) };
+}
+/** Preserve the behavior of existing rules without `paramMatcher`. A rule that
+ * supplies malformed parameter constraints is removed, which is equivalent
+ * to that rule never matching and therefore fails closed into later policy. */
+function resolveRules(raw) {
+    if (!Array.isArray(raw))
+        return [];
+    const resolved = [];
+    for (const candidate of raw) {
+        if (!isObject(candidate) || Array.isArray(candidate))
+            continue;
+        const matcherDescriptor = Object.getOwnPropertyDescriptor(candidate, "paramMatcher");
+        if (!matcherDescriptor) {
+            resolved.push(candidate);
+            continue;
+        }
+        if (!("value" in matcherDescriptor) ||
+            !matcherDescriptor.enumerable ||
+            !isValidRuleParamMatcher(matcherDescriptor.value)) {
+            continue;
+        }
+        resolved.push({
+            ...candidate,
+            paramMatcher: cloneRuleParamMatcher(matcherDescriptor.value),
+        });
+    }
+    return resolved;
+}
 /** Merge validated plugin configuration over the built-in defaults. */
 export function resolveConfig(pluginConfig) {
     if (!isObject(pluginConfig)) {
@@ -93,9 +143,7 @@ export function resolveConfig(pluginConfig) {
         previews: resolvePreviews(pluginConfig.previews),
         unattendedPolicy: resolveUnattendedPolicy(pluginConfig.unattendedPolicy),
         approvalWindow: resolveWindowConfig(pluginConfig.approvalWindow),
-        rules: Array.isArray(pluginConfig.rules)
-            ? pluginConfig.rules
-            : [],
+        rules: resolveRules(pluginConfig.rules),
         autoPassSessionKeys: Array.isArray(pluginConfig.autoPassSessionKeys)
             ? pluginConfig.autoPassSessionKeys.map(String)
             : [...DEFAULT_CONFIG.autoPassSessionKeys],

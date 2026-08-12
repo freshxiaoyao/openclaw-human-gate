@@ -246,7 +246,12 @@ const pluginEntry: OpenClawPluginDefinition = definePluginEntry({
         if (event.toolName === ASK_TOOL_NAME) return undefined;
 
         const sessionKey = ctx.sessionKey ?? "";
-        const baseDecision = evaluatePolicy(event.toolName, event.toolKind, config);
+        const baseDecision = evaluatePolicy(
+          event.toolName,
+          event.toolKind,
+          config,
+          event.params,
+        );
         // An explicit base block is terminal and needs neither parameter
         // inspection nor preview generation.
         if (baseDecision.mode === "block") {
@@ -278,6 +283,9 @@ const pluginEntry: OpenClawPluginDefinition = definePluginEntry({
           ? analyzerRegistry.analyze(analysisContext)
           : EMPTY_SEMANTIC_REPORT;
         const decision = reduceDecision(baseDecision, semanticReport);
+        const isParamScopedRule = decision.source === "user" &&
+          decision.rule !== undefined &&
+          Object.prototype.hasOwnProperty.call(decision.rule, "paramMatcher");
 
         log.debug?.(logPayload("human-gate: evaluated", {
           tool: event.toolName,
@@ -289,7 +297,10 @@ const pluginEntry: OpenClawPluginDefinition = definePluginEntry({
         }));
 
         if (decision.mode === "auto") {
-          return undefined;
+          // A parameter-scoped auto decision is bound to the exact JSON-safe
+          // snapshot that matched. This prevents the host from executing a
+          // subsequently mutated action under an earlier narrow decision.
+          return isParamScopedRule ? { params: paramsSnapshot } : undefined;
         }
 
         // block is unconditional: a tool the operator explicitly banned must
@@ -356,6 +367,7 @@ const pluginEntry: OpenClawPluginDefinition = definePluginEntry({
         if (
           sessionKey &&
           decision.windowEligible &&
+          !isParamScopedRule &&
           !approvalWindow.bypasses(win, decision) &&
           approvalWindow.isOpen(win, sessionKey, event.toolName, ctx.runId, now)
         ) {
@@ -399,6 +411,7 @@ const pluginEntry: OpenClawPluginDefinition = definePluginEntry({
                 if (
                   (res === "allow-once" || res === "allow-always") &&
                   decision.windowEligible &&
+                  !isParamScopedRule &&
                   !approvalWindow.bypasses(win, decision)
                 ) {
                   await approvalWindow.open(

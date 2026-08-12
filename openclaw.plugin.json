@@ -14,6 +14,32 @@
   "configSchema": {
     "type": "object",
     "additionalProperties": false,
+    "$defs": {
+      "paramScalar": {
+        "type": ["string", "number", "boolean", "null"]
+      },
+      "paramCondition": {
+        "type": "object",
+        "additionalProperties": false,
+        "minProperties": 2,
+        "maxProperties": 2,
+        "required": ["key"],
+        "properties": {
+          "key": {
+            "type": "string",
+            "pattern": "^(?!(?:__proto__|prototype|constructor)$)[A-Za-z_][A-Za-z0-9_-]{0,127}$"
+          },
+          "equals": { "$ref": "#/$defs/paramScalar" },
+          "in": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 32,
+            "items": { "$ref": "#/$defs/paramScalar" }
+          },
+          "missing": { "const": true }
+        }
+      }
+    },
     "properties": {
       "defaultMode": {
         "type": "string",
@@ -171,6 +197,27 @@
             "toolKind": {
               "type": "string",
               "description": "Match host toolKind discriminator (e.g. code_mode_exec, exec, apply_patch)."
+            },
+            "paramMatcher": {
+              "type": "object",
+              "additionalProperties": false,
+              "minProperties": 1,
+              "maxProperties": 1,
+              "description": "One-level parameter expression. Use all or any with direct-own equals, in, or missing conditions. Invalid or missing required values never match.",
+              "properties": {
+                "all": {
+                  "type": "array",
+                  "minItems": 1,
+                  "maxItems": 16,
+                  "items": { "$ref": "#/$defs/paramCondition" }
+                },
+                "any": {
+                  "type": "array",
+                  "minItems": 1,
+                  "maxItems": 16,
+                  "items": { "$ref": "#/$defs/paramCondition" }
+                }
+              }
             },
             "mode": {
               "type": "string",

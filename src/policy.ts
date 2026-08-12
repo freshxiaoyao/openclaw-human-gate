@@ -20,8 +20,11 @@
 import {
   type GateRule,
   type HumanGateConfig,
+  type ParamCondition,
+  type ParamScalar,
   type PolicyDecision,
   type GateSeverity,
+  type RuleParamMatcher,
 } from "./types.js";
 import {
   BUILTIN_DESTRUCTIVE_RULES,
@@ -68,10 +71,139 @@ function compilePattern(source: string | undefined): RegExp | undefined {
   }
 }
 
+const MAX_PARAM_CONDITIONS = 16;
+const MAX_PARAM_IN_VALUES = 32;
+const SAFE_DIRECT_PARAM_KEY = /^[A-Za-z_][A-Za-z0-9_-]{0,127}$/;
+const FORBIDDEN_PARAM_KEYS = new Set(["__proto__", "prototype", "constructor"]);
+
+function isObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isParamScalar(value: unknown): value is ParamScalar {
+  return value === null ||
+    typeof value === "string" ||
+    typeof value === "boolean" ||
+    (typeof value === "number" && Number.isFinite(value));
+}
+
+/** Only simple top-level names are supported. Dotted/bracketed paths and
+ * prototype-control names are rejected instead of being interpreted. */
+export function isSafeDirectParamKey(key: string): boolean {
+  return SAFE_DIRECT_PARAM_KEY.test(key) && !FORBIDDEN_PARAM_KEYS.has(key.toLowerCase());
+}
+
+function ownDataValue(object: object, key: PropertyKey): unknown | undefined {
+  const descriptor = Object.getOwnPropertyDescriptor(object, key);
+  if (!descriptor || !("value" in descriptor) || !descriptor.enumerable) return undefined;
+  return descriptor.value;
+}
+
+function isScalarArray(value: unknown): value is ParamScalar[] {
+  if (!Array.isArray(value) || value.length < 1 || value.length > MAX_PARAM_IN_VALUES) {
+    return false;
+  }
+  const allowedKeys = new Set<PropertyKey>(["length"]);
+  for (let index = 0; index < value.length; index += 1) {
+    const key = String(index);
+    allowedKeys.add(key);
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (!descriptor || !("value" in descriptor) || !descriptor.enumerable) return false;
+    if (!isParamScalar(descriptor.value)) return false;
+  }
+  return Reflect.ownKeys(value).every((key) => allowedKeys.has(key));
+}
+
+function isValidParamCondition(value: unknown): value is ParamCondition {
+  if (!isObject(value)) return false;
+  const keys = Reflect.ownKeys(value);
+  if (keys.length !== 2 || !keys.every((key) => typeof key === "string")) return false;
+  const key = ownDataValue(value, "key");
+  if (typeof key !== "string" || !isSafeDirectParamKey(key)) return false;
+  const operators = ["equals", "in", "missing"].filter((operator) =>
+    Object.prototype.hasOwnProperty.call(value, operator)
+  );
+  if (operators.length !== 1) return false;
+  const operator = operators[0];
+  if (!operator || !keys.includes(operator)) return false;
+  const operand = ownDataValue(value, operator);
+  if (operator === "equals") return isParamScalar(operand);
+  if (operator === "in") return isScalarArray(operand);
+  return operand === true;
+}
+
+function isConditionArray(value: unknown): value is ParamCondition[] {
+  if (!Array.isArray(value) || value.length < 1 || value.length > MAX_PARAM_CONDITIONS) {
+    return false;
+  }
+  const allowedKeys = new Set<PropertyKey>(["length"]);
+  for (let index = 0; index < value.length; index += 1) {
+    const key = String(index);
+    allowedKeys.add(key);
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (!descriptor || !("value" in descriptor) || !descriptor.enumerable) return false;
+    if (!isValidParamCondition(descriptor.value)) return false;
+  }
+  return Reflect.ownKeys(value).every((key) => allowedKeys.has(key));
+}
+
+/** Runtime validation mirrors the manifest schema. A matcher has exactly one
+ * top-level `all` or `any` array and cannot contain nested boolean groups. */
+export function isValidRuleParamMatcher(value: unknown): value is RuleParamMatcher {
+  if (!isObject(value)) return false;
+  const keys = Reflect.ownKeys(value);
+  if (keys.length !== 1 || (keys[0] !== "all" && keys[0] !== "any")) return false;
+  return isConditionArray(ownDataValue(value, keys[0]));
+}
+
+function conditionMatches(
+  condition: ParamCondition,
+  toolParams: Readonly<Record<string, unknown>>,
+): boolean {
+  const key = ownDataValue(condition, "key");
+  if (typeof key !== "string") return false;
+  const descriptor = Object.getOwnPropertyDescriptor(toolParams, key);
+  if (Object.prototype.hasOwnProperty.call(condition, "missing")) return descriptor === undefined;
+  if (!descriptor || !("value" in descriptor) || !descriptor.enumerable) return false;
+  if (Object.prototype.hasOwnProperty.call(condition, "equals")) {
+    return descriptor.value === ownDataValue(condition, "equals");
+  }
+  const candidates = ownDataValue(condition, "in");
+  return Array.isArray(candidates) &&
+    candidates.some((candidate) => candidate === descriptor.value);
+}
+
+/** Match direct-own parameter constraints without invoking accessors or
+ * traversing prototypes. Invalid matchers and missing required values fail. */
+export function matchRuleParamMatcher(
+  matcher: unknown,
+  toolParams: Readonly<Record<string, unknown>> | undefined,
+): boolean {
+  if (!isValidRuleParamMatcher(matcher) || !toolParams || typeof toolParams !== "object") {
+    return false;
+  }
+  if (Object.prototype.hasOwnProperty.call(matcher, "all")) {
+    const all = ownDataValue(matcher, "all") as ParamCondition[];
+    return all.every((condition) => conditionMatches(condition, toolParams));
+  }
+  const any = ownDataValue(matcher, "any") as ParamCondition[];
+  return any.some((condition) => conditionMatches(condition, toolParams));
+}
+
+function hasInheritedParamMatcher(rule: GateRule): boolean {
+  let prototype = Object.getPrototypeOf(rule) as object | null;
+  while (prototype) {
+    if (Object.getOwnPropertyDescriptor(prototype, "paramMatcher")) return true;
+    prototype = Object.getPrototypeOf(prototype) as object | null;
+  }
+  return false;
+}
+
 function ruleMatches(
   rule: GateRule,
   toolName: string,
   toolKind: string | undefined,
+  toolParams: Readonly<Record<string, unknown>> | undefined,
 ): boolean {
   if (rule.toolName && rule.toolName !== toolName) return false;
   if (rule.toolKind && rule.toolKind !== toolKind) return false;
@@ -80,6 +212,14 @@ function ruleMatches(
     // Invalid configured regexes must never become match-all rules. Treat the
     // rule as non-matching; manifest JSON Schema cannot validate regex syntax.
     if (!re || !re.test(toolName)) return false;
+  }
+  const matcherDescriptor = Object.getOwnPropertyDescriptor(rule, "paramMatcher");
+  if (matcherDescriptor) {
+    if (!("value" in matcherDescriptor) || !matcherDescriptor.enumerable) return false;
+    if (!matchRuleParamMatcher(matcherDescriptor.value, toolParams)) return false;
+  } else if (hasInheritedParamMatcher(rule)) {
+    // Never let a prototype-supplied matcher silently turn into a broad rule.
+    return false;
   }
   return true;
 }
@@ -123,7 +263,21 @@ function classifyByName(
   toolName: string,
   toolKind: string | undefined,
   config: HumanGateConfig,
+  toolParams: Readonly<Record<string, unknown>> | undefined,
 ): PolicyDecision | undefined {
+  // `session_status` normally observes state, but an explicit model parameter
+  // persists a model override. Presence is checked without reading a getter.
+  if (
+    toolName === "session_status" &&
+    toolParams &&
+    Object.getOwnPropertyDescriptor(toolParams, "model") !== undefined
+  ) {
+    return requireApprovalDecision(
+      "builtin:session-status-model-change",
+      "session_status with model changes persistent session configuration",
+      config,
+    );
+  }
   // host toolKind is authoritative when present.
   if (toolKind) {
     if (READONLY_TOOL_KINDS.has(toolKind)) {
@@ -185,24 +339,25 @@ export function evaluatePolicy(
   toolName: string,
   toolKind: string | undefined,
   config: HumanGateConfig,
+  toolParams?: Readonly<Record<string, unknown>>,
 ): PolicyDecision {
   // 1. User rules (explicit override).
   for (const rule of config.rules) {
-    if (ruleMatches(rule, toolName, toolKind)) {
+    if (ruleMatches(rule, toolName, toolKind, toolParams)) {
       return resolveDecision(rule, config, "user");
     }
   }
 
   // 2. Built-in destructive toolKind rules.
   for (const rule of BUILTIN_DESTRUCTIVE_RULES) {
-    if (ruleMatches(rule, toolName, toolKind)) {
+    if (ruleMatches(rule, toolName, toolKind, toolParams)) {
       return resolveDecision(rule, config, "builtin");
     }
   }
 
   // 3. Name-token classifier.
   if (config.useClassifiers) {
-    const classified = classifyByName(toolName, toolKind, config);
+    const classified = classifyByName(toolName, toolKind, config, toolParams);
     if (classified) return classified;
   }
 

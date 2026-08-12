@@ -179,3 +179,170 @@ test("useClassifiers: false disables name classification", () => {
   const cfgOpen = config({ useClassifiers: false, defaultMode: "auto" });
   assert.equal(evaluatePolicy("writeFile", undefined, cfgOpen).mode, "auto");
 });
+
+test("parameter matcher auto-passes only approved process observation actions", () => {
+  const cfg = config({
+    rules: [{
+      id: "process-observation",
+      toolName: "process",
+      paramMatcher: {
+        all: [{ key: "action", in: ["list", "poll", "log"] }],
+      },
+      mode: "auto",
+    }],
+  });
+
+  for (const action of ["list", "poll", "log"]) {
+    const decision = evaluatePolicy("process", undefined, cfg, { action });
+    assert.equal(decision.mode, "auto", action);
+    assert.equal(decision.rule?.id, "process-observation");
+  }
+  for (const params of [{}, { action: "write" }, { action: "kill" }, { action: "LIST" }]) {
+    assert.equal(evaluatePolicy("process", undefined, cfg, params).mode, APPROVAL);
+  }
+});
+
+test("one-level any supports missing or exact own values for session observation", () => {
+  const cfg = config({
+    rules: [{
+      id: "session-observation",
+      toolNamePattern: "^(?:sessions_list|sessions_history|subagents)$",
+      paramMatcher: {
+        any: [
+          { key: "action", missing: true },
+          { key: "action", equals: "list" },
+        ],
+      },
+      mode: "auto",
+    }],
+  });
+
+  assert.equal(evaluatePolicy("subagents", undefined, cfg, {}).mode, "auto");
+  assert.equal(evaluatePolicy("subagents", undefined, cfg, { action: "list" }).mode, "auto");
+  assert.equal(evaluatePolicy("subagents", undefined, cfg, { action: "kill" }).mode, APPROVAL);
+  assert.equal(evaluatePolicy("sessions_delete", undefined, cfg, {}).mode, APPROVAL);
+
+  const inherited = Object.create({ action: "list" });
+  assert.equal(evaluatePolicy("subagents", undefined, cfg, inherited).mode, "auto");
+  const exactOnly = config({
+    rules: [{
+      id: "exact-only",
+      toolName: "process",
+      paramMatcher: { all: [{ key: "action", equals: "list" }] },
+      mode: "auto",
+    }],
+  });
+  assert.equal(evaluatePolicy("process", undefined, exactOnly, inherited).mode, APPROVAL);
+});
+
+test("invalid, accessor, inherited, and prototype-injected matchers never match", () => {
+  const invalidMatchers = [
+    {},
+    { all: [] },
+    { all: [{ key: "action", equals: "list", in: ["list"] }] },
+    { all: [{ key: "action.value", equals: "list" }] },
+    { all: [{ key: "constructor", equals: "list" }] },
+    { all: [{ key: "action", in: [] }] },
+    { all: [{ key: "action", missing: false }] },
+    { all: [{ key: "action", equals: { nested: true } }] },
+    { all: [{ key: "action", equals: "list" }], any: [{ key: "action", equals: "list" }] },
+  ];
+  for (const paramMatcher of invalidMatchers) {
+    const cfg = config({
+      rules: [{ id: "invalid", toolName: "process", paramMatcher, mode: "auto" }],
+    });
+    assert.equal(evaluatePolicy("process", undefined, cfg, { action: "list" }).mode, APPROVAL);
+  }
+
+  let getterRead = false;
+  const params = {};
+  Object.defineProperty(params, "action", {
+    enumerable: true,
+    get() {
+      getterRead = true;
+      return "list";
+    },
+  });
+  const safeCfg = config({
+    rules: [{
+      id: "safe",
+      toolName: "process",
+      paramMatcher: { all: [{ key: "action", equals: "list" }] },
+      mode: "auto",
+    }],
+  });
+  assert.equal(evaluatePolicy("process", undefined, safeCfg, params).mode, APPROVAL);
+  assert.equal(getterRead, false);
+
+  const inheritedMatcherRule = Object.create({
+    paramMatcher: { all: [{ key: "action", equals: "list" }] },
+  });
+  Object.assign(inheritedMatcherRule, { id: "inherited", toolName: "process", mode: "auto" });
+  assert.equal(
+    evaluatePolicy("process", undefined, config({ rules: [inheritedMatcherRule] }), { action: "list" }).mode,
+    APPROVAL,
+  );
+
+  const inheritedGroup = Object.create({ all: [{ key: "action", equals: "list" }] });
+  const inheritedOperator = Object.create({ equals: "list" });
+  Object.assign(inheritedOperator, { key: "action" });
+  for (const paramMatcher of [inheritedGroup, { all: [inheritedOperator] }]) {
+    assert.equal(
+      evaluatePolicy(
+        "process",
+        undefined,
+        config({ rules: [{ id: "proto", toolName: "process", paramMatcher, mode: "auto" }] }),
+        { action: "list" },
+      ).mode,
+      APPROVAL,
+    );
+  }
+
+  const injectedMissing = Object.assign(
+    Object.create({ missing: true }),
+    { key: "action", in: ["list"] },
+  );
+  assert.equal(
+    evaluatePolicy(
+      "process",
+      undefined,
+      config({
+        rules: [{
+          id: "injected-missing",
+          toolName: "process",
+          paramMatcher: { any: [injectedMissing] },
+          mode: "auto",
+        }],
+      }),
+      {},
+    ).mode,
+    APPROVAL,
+  );
+
+  const ownEquals = { key: "action", equals: "list" };
+  const ownAnyWithInheritedAll = Object.assign(
+    Object.create({ all: [{ key: "action", missing: true }] }),
+    { any: [ownEquals] },
+  );
+  const ownAnyCfg = config({
+    rules: [{
+      id: "own-any",
+      toolName: "process",
+      paramMatcher: ownAnyWithInheritedAll,
+      mode: "auto",
+    }],
+  });
+  assert.equal(evaluatePolicy("process", undefined, ownAnyCfg, {}).mode, APPROVAL);
+  assert.equal(evaluatePolicy("process", undefined, ownAnyCfg, { action: "list" }).mode, "auto");
+});
+
+test("session_status with an own model parameter requires approval", () => {
+  const cfg = config();
+  assert.equal(evaluatePolicy("session_status", undefined, cfg, {}).mode, "auto");
+  const decision = evaluatePolicy("session_status", undefined, cfg, { model: "openai/gpt" });
+  assert.equal(decision.mode, APPROVAL);
+  assert.equal(decision.rule?.id, "builtin:session-status-model-change");
+
+  const inherited = Object.create({ model: "openai/gpt" });
+  assert.equal(evaluatePolicy("session_status", undefined, cfg, inherited).mode, "auto");
+});

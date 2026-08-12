@@ -20,6 +20,23 @@ export type ApprovalDecision =
   | "timeout"
   | "cancelled";
 
+/** JSON scalar supported by parameter-level policy matching. Objects and
+ * arrays are deliberately excluded so equality stays unambiguous. */
+export type ParamScalar = string | number | boolean | null;
+
+/** One condition over a direct, own tool parameter. Operator objects are
+ * mutually exclusive and validated strictly at runtime. */
+export type ParamCondition =
+  | { key: string; equals: ParamScalar }
+  | { key: string; in: ParamScalar[] }
+  | { key: string; missing: true };
+
+/** A deliberately one-level boolean expression. Nested matcher trees are not
+ * supported, keeping authorization rules inspectable and bounded. */
+export type RuleParamMatcher =
+  | { all: ParamCondition[] }
+  | { any: ParamCondition[] };
+
 /** A single policy rule. First match wins. */
 export interface GateRule {
   /** Stable rule id, used in logs and allow-always keys. */
@@ -30,6 +47,10 @@ export interface GateRule {
   toolNamePattern?: string;
   /** Match host toolKind discriminator (e.g. `code_mode_exec`, `exec`, `apply_patch`). */
   toolKind?: string;
+  /** Match direct, own tool parameters with one `all` or `any` expression.
+   * Conditions support `equals`, `in`, or `missing: true`. Invalid matchers,
+   * accessors, and inherited values never match. */
+  paramMatcher?: RuleParamMatcher;
   /** Decision for a matched call. */
   mode: GateMode;
   /** Severity passed to the approval UI. Defaults to config defaultSeverity. */

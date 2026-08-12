@@ -1,14 +1,24 @@
 import type {
   ApprovalPreviewConfig,
   ApprovalWindowConfig,
+  GateRule,
   HumanGateConfig,
+  ParamCondition,
+  ParamScalar,
+  RuleParamMatcher,
   SemanticAnalysisConfig,
   UnattendedPolicyConfig,
 } from "./types.js";
 import { DEFAULT_CONFIG } from "./types.js";
+import { isValidRuleParamMatcher } from "./policy.js";
 
 function isObject(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null;
+}
+
+function ownDataValue(object: object, key: PropertyKey): unknown | undefined {
+  const descriptor = Object.getOwnPropertyDescriptor(object, key);
+  return descriptor && "value" in descriptor ? descriptor.value : undefined;
 }
 
 function resolveWindowConfig(raw: unknown): ApprovalWindowConfig {
@@ -65,6 +75,54 @@ function resolveUnattendedPolicy(raw: unknown): UnattendedPolicyConfig {
   };
 }
 
+function cloneParamCondition(condition: ParamCondition): ParamCondition {
+  const key = ownDataValue(condition, "key") as string;
+  if (Object.prototype.hasOwnProperty.call(condition, "equals")) {
+    return { key, equals: ownDataValue(condition, "equals") as ParamScalar };
+  }
+  if (Object.prototype.hasOwnProperty.call(condition, "in")) {
+    return { key, in: [...(ownDataValue(condition, "in") as Array<string | number | boolean | null>)] };
+  }
+  return { key, missing: true };
+}
+
+function cloneRuleParamMatcher(matcher: RuleParamMatcher): RuleParamMatcher {
+  if (Object.prototype.hasOwnProperty.call(matcher, "all")) {
+    const all = ownDataValue(matcher, "all") as ParamCondition[];
+    return { all: all.map(cloneParamCondition) };
+  }
+  const any = ownDataValue(matcher, "any") as ParamCondition[];
+  return { any: any.map(cloneParamCondition) };
+}
+
+/** Preserve the behavior of existing rules without `paramMatcher`. A rule that
+ * supplies malformed parameter constraints is removed, which is equivalent
+ * to that rule never matching and therefore fails closed into later policy. */
+function resolveRules(raw: unknown): GateRule[] {
+  if (!Array.isArray(raw)) return [];
+  const resolved: GateRule[] = [];
+  for (const candidate of raw) {
+    if (!isObject(candidate) || Array.isArray(candidate)) continue;
+    const matcherDescriptor = Object.getOwnPropertyDescriptor(candidate, "paramMatcher");
+    if (!matcherDescriptor) {
+      resolved.push(candidate as unknown as GateRule);
+      continue;
+    }
+    if (
+      !("value" in matcherDescriptor) ||
+      !matcherDescriptor.enumerable ||
+      !isValidRuleParamMatcher(matcherDescriptor.value)
+    ) {
+      continue;
+    }
+    resolved.push({
+      ...(candidate as unknown as GateRule),
+      paramMatcher: cloneRuleParamMatcher(matcherDescriptor.value),
+    });
+  }
+  return resolved;
+}
+
 /** Merge validated plugin configuration over the built-in defaults. */
 export function resolveConfig(pluginConfig: unknown): HumanGateConfig {
   if (!isObject(pluginConfig)) {
@@ -104,9 +162,7 @@ export function resolveConfig(pluginConfig: unknown): HumanGateConfig {
     previews: resolvePreviews(pluginConfig.previews),
     unattendedPolicy: resolveUnattendedPolicy(pluginConfig.unattendedPolicy),
     approvalWindow: resolveWindowConfig(pluginConfig.approvalWindow),
-    rules: Array.isArray(pluginConfig.rules)
-      ? (pluginConfig.rules as HumanGateConfig["rules"])
-      : [],
+    rules: resolveRules(pluginConfig.rules),
     autoPassSessionKeys: Array.isArray(pluginConfig.autoPassSessionKeys)
       ? (pluginConfig.autoPassSessionKeys as unknown[]).map(String)
       : [...DEFAULT_CONFIG.autoPassSessionKeys],

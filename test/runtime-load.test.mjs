@@ -138,6 +138,53 @@ test("read-only call passes through", async () => {
   assert.equal(res, undefined);
 });
 
+test("parameter-scoped process rule auto-passes only list, poll, and log", async () => {
+  const entry = await loadPlugin();
+  const { api, calls } = createMockApi({
+    pluginConfig: {
+      rules: [{
+        id: "process-observation",
+        toolName: "process",
+        paramMatcher: {
+          all: [{ key: "action", in: ["list", "poll", "log"] }],
+        },
+        mode: "auto",
+      }],
+    },
+  });
+  await entry.register(api);
+  const handler = hookFor(calls, "before_tool_call");
+  const ctx = { sessionKey: "agent:main:webchat", runId: "run-1" };
+
+  for (const action of ["list", "poll", "log"]) {
+    const original = { action };
+    const result = await handler({ toolName: "process", params: original }, ctx);
+    assert.deepEqual(result?.params, { action });
+    assert.notEqual(result.params, original, "narrow auto decision must bind a snapshot");
+    assert.equal(result.requireApproval, undefined);
+  }
+
+  for (const params of [{}, { action: "write" }, { action: "kill" }, { action: "unknown" }]) {
+    const result = await handler({ toolName: "process", params }, ctx);
+    assert.ok(result?.requireApproval, JSON.stringify(params));
+  }
+});
+
+test("session_status model mutation is not auto-classified as read-only", async () => {
+  const entry = await loadPlugin();
+  const { api, calls } = createMockApi();
+  await entry.register(api);
+  const handler = hookFor(calls, "before_tool_call");
+  const ctx = { sessionKey: "agent:main:webchat", runId: "run-1" };
+
+  assert.equal(await handler({ toolName: "session_status", params: {} }, ctx), undefined);
+  const mutation = await handler(
+    { toolName: "session_status", params: { model: "openai/gpt" } },
+    ctx,
+  );
+  assert.ok(mutation?.requireApproval);
+});
+
 test("explicit block rule is enforced even in cron auto-pass context", async () => {
   const entry = await loadPlugin();
   const { api, calls } = createMockApi({

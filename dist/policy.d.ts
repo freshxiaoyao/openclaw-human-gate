@@ -16,7 +16,7 @@
  * gated; anything unrecognized is gated unless the operator opts into
  * fail-open (`defaultMode: "auto"`).
  */
-import { type HumanGateConfig, type PolicyDecision } from "./types.js";
+import { type HumanGateConfig, type PolicyDecision, type RuleParamMatcher } from "./types.js";
 /** Split a tool name into lowercase segments.
  *
  * Handles camelCase (`readWriteFile` -> read, write, file), snake_case
@@ -27,7 +27,16 @@ import { type HumanGateConfig, type PolicyDecision } from "./types.js";
  * a token if the entire name is a vocabulary word (`cat`, `exec`).
  */
 export declare function tokenizeName(name: string): string[];
-export declare function evaluatePolicy(toolName: string, toolKind: string | undefined, config: HumanGateConfig): PolicyDecision;
+/** Only simple top-level names are supported. Dotted/bracketed paths and
+ * prototype-control names are rejected instead of being interpreted. */
+export declare function isSafeDirectParamKey(key: string): boolean;
+/** Runtime validation mirrors the manifest schema. A matcher has exactly one
+ * top-level `all` or `any` array and cannot contain nested boolean groups. */
+export declare function isValidRuleParamMatcher(value: unknown): value is RuleParamMatcher;
+/** Match direct-own parameter constraints without invoking accessors or
+ * traversing prototypes. Invalid matchers and missing required values fail. */
+export declare function matchRuleParamMatcher(matcher: unknown, toolParams: Readonly<Record<string, unknown>> | undefined): boolean;
+export declare function evaluatePolicy(toolName: string, toolKind: string | undefined, config: HumanGateConfig, toolParams?: Readonly<Record<string, unknown>>): PolicyDecision;
 /** True when a session key belongs to an unattended context (cron isolated
  *  runs, heartbeat runs, subagents) that must not stall on an approval
  *  popup nobody can see.

@@ -76,7 +76,8 @@ The plugin does **not** intercept every tool by default — that would be
 unusable. Instead it classifies each call and prompts for anything that might
 have side effects; reads pass through:
 
-1. **User rules** (first match wins) — explicit override.
+1. **User rules** (first match wins) — explicit override, optionally scoped to
+   direct tool parameters with a strict one-level matcher.
 2. **Built-in destructive toolKinds** — `exec`, `apply_patch`, `code_mode_exec`
    → `require-approval`.
 3. **Name-token classifier** (host `toolKind` first, then the whole tool name
@@ -281,24 +282,25 @@ destructive toolKinds → name-token classifier → `defaultMode`. See
           },
           rules: [
             {
-              id: "deploy-prod",
-              toolName: "deploy_service",
-              mode: "require-approval",
-              severity: "critical",
-              allowedDecisions: ["allow-once", "deny"],
-              timeoutMs: 300000,
-              reason: "Deploy to production"
+              id: "process-observation-auto",
+              toolName: "process",
+              paramMatcher: {
+                all: [{ key: "action", in: ["list", "poll", "log"] }]
+              },
+              mode: "auto",
+              reason: "Read-only process observation"
             },
             {
-              id: "read-only-auto",
-              toolNamePattern: "^(read_|get_|list_).*",
-              mode: "auto"
-            },
-            {
-              id: "block-rm",
-              toolNamePattern: "^rm_.*",
-              mode: "block",
-              reason: "Destructive rm_* tools are blocked"
+              id: "session-observation-auto",
+              toolNamePattern: "^(?:sessions_list|sessions_history|subagents)$",
+              paramMatcher: {
+                any: [
+                  { key: "action", missing: true },
+                  { key: "action", equals: "list" }
+                ]
+              },
+              mode: "auto",
+              reason: "Read-only session observation"
             }
           ]
         }
@@ -316,11 +318,32 @@ destructive toolKinds → name-token classifier → `defaultMode`. See
 | `toolName`        | string                                                    | Exact tool name match. Omit to match any.                               |
 | `toolNamePattern` | string (regex source)                                     | Matched against `toolName`; an invalid regex makes the rule non-matching and is never treated as match-all. |
 | `toolKind`        | string                                                    | Match host `toolKind` (e.g. `exec`, `code_mode_exec`, `apply_patch`).   |
+| `paramMatcher`    | `{all: condition[]}` or `{any: condition[]}`              | Match direct, own parameters with one bounded boolean group.           |
 | `mode`            | `auto` \| `require-approval` \| `block` (required)        | Decision for a matched call.                                            |
 | `severity`        | `info` \| `warning` \| `critical`                         | Shown in the approval UI. Defaults to `defaultSeverity`.               |
 | `allowedDecisions`| `["allow-once","allow-always","deny"]`                    | Decisions offered to the approver.                                      |
 | `timeoutMs`       | integer (1000–600000)                                     | Approval timeout. Defaults to `defaultTimeoutMs`.                       |
 | `reason`          | string                                                    | Human-readable reason in the approval request / block reason.           |
+
+Parameter conditions have exactly one operator:
+
+- `{ key: "action", equals: "list" }` uses strict JSON-scalar equality.
+- `{ key: "action", in: ["list", "poll", "log"] }` matches one member.
+- `{ key: "action", missing: true }` matches only when the call has no direct,
+  own property with that name.
+
+`all` is logical AND and `any` is logical OR. Matchers are deliberately only
+one level deep. Nested groups, empty arrays, extra fields, non-scalar values,
+dotted/bracketed paths, and `__proto__` / `prototype` / `constructor` keys are
+invalid. Invalid matchers, accessor properties, inherited values, or a missing
+parameter required by `equals` / `in` make the rule non-matching. Evaluation
+continues to later rules and the fail-closed built-in/default policy.
+
+The process example therefore auto-passes only `list`, `poll`, and `log`;
+`write`, `kill`, an unknown action, or a missing action does not match. The
+session rule uses an exact tool-name pattern instead of a broad `sessions_*`
+prefix. Separately, `session_status` with a direct `model` parameter is treated
+as a state change and requires approval.
 
 ### Built-in behavior (applied when no user rule matches)
 
