@@ -176,6 +176,12 @@ export function resolveConfig(pluginConfig: unknown): HumanGateConfig {
     rememberAllowAlways: typeof pluginConfig.rememberAllowAlways === "boolean"
       ? pluginConfig.rememberAllowAlways
       : DEFAULT_CONFIG.rememberAllowAlways,
+    allowAlwaysTtlMs: clampInteger(
+      pluginConfig.allowAlwaysTtlMs,
+      DEFAULT_CONFIG.allowAlwaysTtlMs,
+      60_000,
+      86_400_000,
+    ),
     useClassifiers: typeof pluginConfig.useClassifiers === "boolean"
       ? pluginConfig.useClassifiers
       : DEFAULT_CONFIG.useClassifiers,

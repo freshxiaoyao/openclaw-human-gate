@@ -48,12 +48,16 @@ its own terminal UI; it reuses OpenClaw's.
   parameters are inspected before approval. Remote pipe-to-shell, recursive forced deletion,
   force pushes, destructive infrastructure operations, production deployment,
   encoded execution, and likely credential exfiltration are promoted to
-  `critical`. Semantic analysis never downgrades a policy decision.
+  `critical`. Common dev-loop intents (`build`, `test`, `format`, `git commit`)
+  are recognized as reusable semantic categories. Semantic analysis never
+  downgrades a policy decision.
 - **Content-aware approval previews** — command/code, write, edit, and
   `apply_patch` inputs receive bounded previews. Secrets, ANSI controls, and
   bidirectional Unicode controls are sanitized before display.
-- **Narrow `allow-always` grants** — remembered decisions are session-local and
-  available only when analysis produces a path-bound grant fingerprint.
+- **Bounded `allow-always` lease** — remembered decisions are session-local,
+  path-bound, and expire after `allowAlwaysTtlMs` (default 4h). The native
+  button still reads "allow-always"; internally it is a bounded session/task
+  lease, never an unlimited grant.
 - **Auto-pass for cron / heartbeat** — scheduled runs are never blocked on an
   approval nobody can see; critical semantic risks fail immediately by default.
 - **`human_gate_ask` tool** — Claude Code-style "ask the human" for
@@ -175,6 +179,33 @@ approvalWindow: {
 - `bypassCritical: true` — `severity: "critical"` calls (e.g. a `deploy-prod`
   rule) always prompt even when a window is open.
 
+### Development-loop intents (build / test / format / git commit)
+
+The command analyzer recognizes a conservative set of dev-loop commands as
+complete, window-eligible intents with distinct categories (`dev-build`,
+`dev-test`, `dev-format`, and `source-control` for `git commit`):
+
+- Build — `npm run build`, `yarn build`, `make`, `tsc`, `cargo build`, `go build`, …
+- Test — `npm test`, `pytest`, `cargo test`, `go test`, `jest`, `vitest`, …
+- Format — `prettier --write`, `eslint --fix`, `gofmt -w`, `rustfmt`, `black`, …
+- Git commit — `git commit` (local history write; `git push` stays a network write).
+
+Only a single, non-dynamic invocation with no pipes/redirections is reusable;
+compound commands (`npm test && npm run build`) and check-only formatters
+(`prettier --check`, `eslint` without `--fix`) stay fail-closed. These intents
+have no file targets, so under the default `scope: "path"` they cannot open a
+window. To reuse them per turn (or per time box) while keeping relative-path
+writes per-approval, set `pathFallback: "category"`:
+
+```json5
+approvalWindow: {
+  mode: "turn",
+  scope: "path",
+  pathFallback: "category", // dev intents fall back to category; relative writes still fail closed
+  bypassCritical: true,
+}
+```
+
 The window is opened only when you approve a call (`allow-once` or
 `allow-always`) **and** complete analysis produces a reusable fingerprint.
 Empty semantics, an `unknown` effect/category, partial or failed analysis, an
@@ -187,7 +218,9 @@ remembered only when Human Gate can construct a narrow path-bound grant
 fingerprint containing the full policy identity and semantic sets. A broad
 `destructive`, `effect`, or `category` window therefore cannot become a broad
 permanent grant. Semantic `critical` calls bypass reusable authorization and do
-not offer `allow-always`.
+not offer `allow-always`. Every grant is a **bounded lease** that expires
+`allowAlwaysTtlMs` after it is granted (default 4h); old grants without an
+expiry are discarded on upgrade.
 
 ### Migration from `match`
 

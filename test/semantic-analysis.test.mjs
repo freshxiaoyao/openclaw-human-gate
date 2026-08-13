@@ -160,6 +160,45 @@ test("Git commit and push produce stable, distinct semantic scopes", () => {
   assert.equal(force.windowEligible, false);
 });
 
+test("build, test, and format intents are complete and window-eligible", () => {
+  const build = analyze("npm run build");
+  assert.deepEqual(build.effects, ["code-execution"]);
+  assert.deepEqual(build.categories, ["dev-build"]);
+  assert.equal(build.complete, true);
+  assert.equal(build.windowEligible, true);
+
+  const test = analyze("npm test");
+  assert.deepEqual(test.effects, ["code-execution"]);
+  assert.deepEqual(test.categories, ["dev-test"]);
+  assert.equal(test.complete, true);
+  assert.equal(test.windowEligible, true);
+
+  const format = analyze("prettier --write src/");
+  assert.deepEqual(format.effects, ["local-write"]);
+  assert.deepEqual(format.categories, ["dev-format"]);
+  assert.equal(format.complete, true);
+  assert.equal(format.windowEligible, true);
+});
+
+test("distinct dev intents stay distinct and compound commands stay fail-closed", () => {
+  assert.notDeepEqual(analyze("npm run build").categories, analyze("npm test").categories);
+
+  for (const command of ["npm run build && npm test", "pytest -x && git push", "npm run deploy"]) {
+    const report = analyze(command);
+    assert.equal(report.complete, false, command);
+    assert.equal(report.windowEligible, false, command);
+    assert.ok(report.categories.includes("unknown"), command);
+  }
+});
+
+test("formatter check-only forms remain fail-closed", () => {
+  for (const command of ["prettier --check src/", "eslint src/", "gofmt -l ."]) {
+    const report = analyze(command);
+    assert.equal(report.complete, false, command);
+    assert.equal(report.windowEligible, false, command);
+  }
+});
+
 test("unclassified or compound shell intent remains fail-closed", () => {
   for (const command of ["echo hello", "git log --format=push", "git commit && curl x"]) {
     const report = analyze(command);

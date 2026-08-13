@@ -78,7 +78,7 @@ const HOOK_PRIORITY = 60;
 // the SDK cannot reserve an absolute final slot against another -Infinity hook.
 const PARAM_SEAL_PRIORITY = Number.NEGATIVE_INFINITY;
 /** Bump whenever semantic effects/categories/target derivation changes. */
-const SEMANTIC_RULESET_VERSION = "2026-08-14.1";
+const SEMANTIC_RULESET_VERSION = "2026-08-14.2";
 
 function logPayload(message: string, details: Record<string, unknown>): string {
   return `${message} ${JSON.stringify(details)}`;
@@ -363,6 +363,7 @@ const pluginEntry: OpenClawPluginDefinition = definePluginEntry({
           normalizeAllowAlwaysState,
           update,
         ),
+      config.allowAlwaysTtlMs,
     );
     const approvalWindow = new ApprovalWindowStore(
       (sessionKey) =>
@@ -505,7 +506,7 @@ const pluginEntry: OpenClawPluginDefinition = definePluginEntry({
           sessionKey &&
           config.rememberAllowAlways &&
           fingerprint?.grantKey &&
-          allowAlways.isGranted(sessionKey, fingerprint)
+          allowAlways.isGranted(sessionKey, fingerprint, Date.now())
         ) {
           log.debug?.(logPayload("human-gate: allow-always grant hit", {
             rule: decision.rule?.id,
@@ -596,7 +597,7 @@ const pluginEntry: OpenClawPluginDefinition = definePluginEntry({
                   canRemember &&
                   fingerprint?.grantKey
                 ) {
-                  await allowAlways.grant(sessionKey, fingerprint);
+                  await allowAlways.grant(sessionKey, fingerprint, Date.now());
                   log.info(logPayload("human-gate: allow-always granted", {
                     rule: decision.rule?.id,
                     scopeDigest: fingerprint.grantKey.slice(0, 19),

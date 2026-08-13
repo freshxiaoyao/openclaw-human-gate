@@ -63,6 +63,13 @@
         "default": true,
         "description": "Persist allow-always decisions per session only when analysis can construct a narrow path-bound grant fingerprint."
       },
+      "allowAlwaysTtlMs": {
+        "type": "integer",
+        "minimum": 60000,
+        "maximum": 86400000,
+        "default": 14400000,
+        "description": "Upper bound (ms) for a persisted allow-always grant. The native button still reads 'allow-always'; internally the grant is a bounded session/task lease that expires after this duration."
+      },
       "useClassifiers": {
         "type": "boolean",
         "default": true,

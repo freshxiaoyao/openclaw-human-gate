@@ -45,6 +45,7 @@ test("resolveConfig honors api.pluginConfig values", () => {
     previews: { maxDescriptionChars: 9999, maxLines: 0, redactSecrets: false },
     unattendedPolicy: { critical: "auto" },
     approvalWindow: { mode: "off", match: "destructive", ttlMs: 1234 },
+    allowAlwaysTtlMs: 999999999,
     autoPassSessionKeys: [],
     rules: [{ id: "deny-all", mode: "block" }],
   });
@@ -65,19 +66,50 @@ test("resolveConfig honors api.pluginConfig values", () => {
   assert.equal(cfg.approvalWindow.pathFallback, "none");
   assert.equal(Object.hasOwn(cfg.approvalWindow, "match"), false);
   assert.equal(cfg.approvalWindow.ttlMs, 1234);
+  assert.equal(cfg.allowAlwaysTtlMs, 86_400_000);
   assert.deepEqual(cfg.autoPassSessionKeys, []);
   assert.equal(cfg.rules[0]?.id, "deny-all");
 });
 
 test("allow-always grants are isolated by sessionKey", async () => {
-  const backend = createSessionBackend({ version: 2, grants: {} });
-  const store = new AllowAlwaysStore(backend.read, backend.update);
+  const backend = createSessionBackend({ version: 3, grants: {} });
+  const store = new AllowAlwaysStore(backend.read, backend.update, 3_600_000);
   const fp = windowFingerprint();
 
-  await store.grant("session-a", fp);
+  await store.grant("session-a", fp, 1000);
 
-  assert.equal(store.isGranted("session-a", fp), true);
-  assert.equal(store.isGranted("session-b", fp), false);
+  assert.equal(store.isGranted("session-a", fp, 2000), true);
+  assert.equal(store.isGranted("session-b", fp, 2000), false);
+});
+
+test("allow-always grants expire after the lease TTL", async () => {
+  const backend = createSessionBackend({ version: 3, grants: {} });
+  const ttlMs = 3_600_000;
+  const store = new AllowAlwaysStore(backend.read, backend.update, ttlMs);
+  const fp = windowFingerprint();
+
+  await store.grant("session-a", fp, 1000);
+
+  assert.equal(store.isGranted("session-a", fp, 1000 + ttlMs - 1), true);
+  assert.equal(store.isGranted("session-a", fp, 1000 + ttlMs), false);
+  assert.equal(store.isGranted("session-a", fp, 1000 + ttlMs + 1), false);
+});
+
+test("legacy unlimited allow-always grants without expiry are discarded", async () => {
+  const fp = windowFingerprint();
+  const backend = createSessionBackend({
+    version: 2,
+    grants: {
+      [fp.grantKey]: {
+        fingerprintKey: fp.grantKey,
+        fingerprintVersion: 2,
+        rulesetVersion: "rules-v1",
+        grantedAt: "2026-01-01T00:00:00.000Z",
+      },
+    },
+  });
+  const store = new AllowAlwaysStore(backend.read, backend.update, 3_600_000);
+  assert.equal(store.isGranted("session-a", fp, 2000), false);
 });
 
 test("time approval windows are isolated by sessionKey", async () => {

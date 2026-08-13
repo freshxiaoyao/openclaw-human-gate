@@ -96,6 +96,13 @@ The MVP promotes these classes to critical:
 Output redirection, privilege elevation, dynamic expansion, and partial
 analysis produce warning findings. They never justify auto-authorization.
 
+Beyond the critical corpus, the shell analyzer recognizes a conservative set
+of dev-loop intents as complete and window-eligible: `build`, `test`, `format`,
+and `git commit` (distinct categories `dev-build`, `dev-test`, `dev-format`,
+and `source-control`). Completeness still requires a single, non-dynamic,
+operator/redirection-free invocation across all three dialects; anything
+ambiguous or compound stays fail-closed.
+
 ## Critical invariants
 
 A critical effective decision:
@@ -136,14 +143,16 @@ messages to untrusted channels.
   analyzer-verified bounded exact set of lexical parent directories. Empty,
   partial, or unknown reports do not produce reusable authorization.
 - `allow-always` uses a separate, narrower path-bound fingerprint even when a
-  broader compatibility window scope is configured. Legacy v1 grants and
-  windows are deliberately discarded.
+  broader compatibility window scope is configured. Grants are a **bounded
+  session/task lease** that expires `allowAlwaysTtlMs` after granting (default
+  4h); legacy v1 grants, windows, and grants without an expiry are deliberately
+  discarded.
 - Path normalization is lexical and performs no filesystem I/O. It cannot
   resolve symlinks or junctions. Multiple targets are never collapsed into a
   broader common ancestor.
-- Ordinary shell commands outside the narrowly classified Git commit/push
-  corpus do not open reusable semantic windows. The safe default is another
-  prompt, not a guessed command scope.
+- Ordinary shell commands outside the narrowly classified dev-loop corpus
+  (Git commit/push, build, test, format) do not open reusable semantic windows.
+  The safe default is another prompt, not a guessed command scope.
 - The scanner is not a complete shell AST. Here-documents, process substitution,
   aliases, functions, and runtime expansion remain intentionally untrusted.
 - Redaction patterns are bounded and best-effort.

@@ -71,8 +71,13 @@ export interface HumanGateConfig {
   defaultMode: GateMode;
   defaultSeverity: GateSeverity;
   defaultTimeoutMs: number;
-  /** Persist allow-always decisions per session. */
+  /** Persist allow-always decisions per session as a bounded lease (never
+   *  unlimited). The lease expires allowAlwaysTtlMs after it is granted. */
   rememberAllowAlways: boolean;
+  /** Hard upper bound for a persisted allow-always grant. The native button
+   *  still reads "allow-always"; internally the grant is a session/task lease
+   *  that expires after this many milliseconds. */
+  allowAlwaysTtlMs: number;
   /** When true (default), the built-in read-only / destructive classifier
    *  runs after user rules so reads pass through and writes get gated without
    *  listing every tool. Set false to disable classification and rely solely
@@ -147,6 +152,7 @@ export const DEFAULT_CONFIG: HumanGateConfig = {
   defaultSeverity: "warning",
   defaultTimeoutMs: 300_000,
   rememberAllowAlways: true,
+  allowAlwaysTtlMs: 14_400_000,
   useClassifiers: true,
   semanticAnalysis: {
     enabled: true,

@@ -489,6 +489,36 @@ const RULES: readonly CommandRule[] = [
     matches: (_value, scans) => hasGitIntent(scans, "commit"),
   },
   {
+    id: "command.dev-build",
+    category: "dev-build",
+    severity: "warning",
+    confidence: "high",
+    title: "Build command",
+    explanation: "Compiles or bundles the project. Reusable within an approval window.",
+    effect: "code-execution",
+    matches: (_value, scans) => anyDevIntent(scans, "build"),
+  },
+  {
+    id: "command.dev-test",
+    category: "dev-test",
+    severity: "warning",
+    confidence: "high",
+    title: "Test command",
+    explanation: "Runs the project test suite. Reusable within an approval window.",
+    effect: "code-execution",
+    matches: (_value, scans) => anyDevIntent(scans, "test"),
+  },
+  {
+    id: "command.dev-format",
+    category: "dev-format",
+    severity: "warning",
+    confidence: "high",
+    title: "Code formatting command",
+    explanation: "Rewrites source files to match a formatting convention. Reusable within an approval window.",
+    effect: "local-write",
+    matches: (_value, scans) => anyDevIntent(scans, "format"),
+  },
+  {
     id: "command.git-destructive-history",
     category: "source-control",
     severity: "critical",
@@ -610,21 +640,111 @@ function findingFor(rule: CommandRule, excerpt: string): RiskFinding {
   };
 }
 
+/** Recognized, reusable development-loop intents. Each maps to a distinct
+ * semantic category so approving one does not silently authorize another. */
+type DevIntent = "git-commit" | "git-push" | "build" | "test" | "format";
+
+/** Extract the script name from `npm|yarn|pnpm|bun [run|run-script|exec] <name>`. */
+function packageManagerScript(args: readonly string[]): string | undefined {
+  let index = 0;
+  const first = args[0]?.toLowerCase();
+  if (first === "run" || first === "run-script" || first === "exec") index = 1;
+  const script = args[index];
+  if (!script || script.startsWith("-")) return undefined;
+  return script.toLowerCase();
+}
+
+/** Conservative classifier over a single, already wrapper-peeled invocation.
+ * Anything ambiguous returns undefined and remains fail-closed (per-approval).
+ * Only the write forms of formatters are reusable; their check-only forms
+ * (`prettier --check`, `eslint` without `--fix`, `gofmt -l`) stay fail-closed. */
+function classifyIntent(command: string, args: readonly string[]): DevIntent | undefined {
+  if (command === "git") {
+    const sub = gitSubcommand(args)?.name;
+    if (sub === "commit") return "git-commit";
+    if (sub === "push") return "git-push";
+    return undefined;
+  }
+  const lower = args.map((arg) => arg.toLowerCase());
+
+  if (command === "npm" || command === "yarn" || command === "pnpm" || command === "bun") {
+    const script = packageManagerScript(args);
+    if (script === "build") return "build";
+    if (script === "test") return "test";
+    if (script === "format" || script === "fmt") return "format";
+    return undefined;
+  }
+
+  if (command === "make" || command === "ninja" || command === "tsc" ||
+      command === "babel" || command === "webpack" || command === "esbuild" ||
+      command === "rollup") {
+    return "build";
+  }
+  if (command === "vite") return lower.includes("build") ? "build" : undefined;
+  if (command === "cargo") {
+    if (lower[0] === "build") return "build";
+    if (lower[0] === "test") return "test";
+    if (lower[0] === "fmt") return "format";
+    return undefined;
+  }
+  if (command === "go") {
+    if (lower[0] === "build") return "build";
+    if (lower[0] === "test") return "test";
+    return undefined;
+  }
+  if (command === "dotnet") {
+    if (lower[0] === "build") return "build";
+    if (lower[0] === "test") return "test";
+    return undefined;
+  }
+  if (command === "gradle" || command === "mvn" || command === "maven" || command === "sbt") {
+    if (lower[0] === "build") return "build";
+    if (lower[0] === "test") return "test";
+    if (lower[0] === "compile" || lower[0] === "package" || lower[0] === "install") return "build";
+    return undefined;
+  }
+
+  if (command === "pytest" || command === "py.test" || command === "jest" ||
+      command === "vitest" || command === "mocha" || command === "ava") {
+    return "test";
+  }
+
+  if (command === "rustfmt" || command === "black" || command === "isort") return "format";
+  if (command === "prettier") return lower.includes("--write") || lower.includes("-w") ? "format" : undefined;
+  if (command === "eslint") return lower.includes("--fix") ? "format" : undefined;
+  if (command === "gofmt" || command === "gofumpt") return lower.includes("-w") ? "format" : undefined;
+  if (command === "clang-format") return lower.includes("-i") ? "format" : undefined;
+
+  return undefined;
+}
+
+/** Loose intent detection across any (wrapper-peeled) invocation, used only
+ * for risk findings — never to mint a reusable authorization. */
+function anyDevIntent(scans: readonly ShellScanResult[], intent: DevIntent): boolean {
+  return anyEffectiveInvocation(scans, (command, args) => classifyIntent(command, args) === intent);
+}
+
 /** A reusable semantic authorization must not be minted from a partially
- * understood shell program. For the first production scope we only claim
- * complete intent classification for one, non-dynamic Git commit/push
- * invocation. Other commands are still risk-scanned but remain fail-closed. */
-function hasCompleteGitIntent(scans: readonly ShellScanResult[]): boolean {
+ * understood shell program. Completeness requires a single, non-dynamic,
+ * operator/redirection-free invocation across all three dialects that all
+ * agree on one recognized intent. Other commands are still risk-scanned but
+ * remain fail-closed. */
+function completeIntent(scans: readonly ShellScanResult[]): DevIntent | undefined {
   const rootScans = scans.slice(0, 3);
-  return rootScans.length === 3 && rootScans.every((scan) => {
+  if (rootScans.length !== 3) return undefined;
+  const intents = new Set<DevIntent>();
+  for (const scan of rootScans) {
     if (!scan.complete || scan.invocations.length !== 1 || scan.operators.length > 0 ||
-      scan.redirections.length > 0 || scan.tokens.some((token) => token.dynamic)) return false;
+      scan.redirections.length > 0 || scan.tokens.some((token) => token.dynamic)) {
+      return undefined;
+    }
     const invocation = scan.invocations[0];
     const { command, args } = effectiveInvocationParts(scan, invocation?.index);
-    if (command !== "git") return false;
-    const intent = gitSubcommand(args)?.name;
-    return intent === "commit" || intent === "push";
-  });
+    const intent = classifyIntent(command, args);
+    if (!intent) return undefined;
+    intents.add(intent);
+  }
+  return intents.size === 1 ? [...intents][0] : undefined;
 }
 
 export class CommandAnalyzer implements ToolCallAnalyzer {
@@ -698,7 +818,7 @@ export class CommandAnalyzer implements ToolCallAnalyzer {
     const intentComplete = !wasTruncated &&
       !bundle.wrapperLimitReached &&
       !parseIncomplete &&
-      hasCompleteGitIntent(scans);
+      completeIntent(scans) !== undefined;
     if (!intentComplete && !wasTruncated && !bundle.wrapperLimitReached && !parseIncomplete) {
       findings.push({
         id: "command.intent-incomplete",

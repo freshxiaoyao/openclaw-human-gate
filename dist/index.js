@@ -53,7 +53,7 @@ const HOOK_PRIORITY = 60;
 // the SDK cannot reserve an absolute final slot against another -Infinity hook.
 const PARAM_SEAL_PRIORITY = Number.NEGATIVE_INFINITY;
 /** Bump whenever semantic effects/categories/target derivation changes. */
-const SEMANTIC_RULESET_VERSION = "2026-08-14.1";
+const SEMANTIC_RULESET_VERSION = "2026-08-14.2";
 function logPayload(message, details) {
     return `${message} ${JSON.stringify(details)}`;
 }
@@ -247,7 +247,7 @@ const pluginEntry = definePluginEntry({
             namespace: WINDOW_NAMESPACE,
             description: "Per-session approval windows for Human Gate",
         });
-        const allowAlways = new AllowAlwaysStore((sessionKey) => normalizeAllowAlwaysState(extensionValue(api, sessionKey, ALLOW_ALWAYS_NAMESPACE)), (sessionKey, update) => patchExtension(api, sessionKey, ALLOW_ALWAYS_NAMESPACE, { version: ALLOW_ALWAYS_STATE_VERSION, grants: {} }, normalizeAllowAlwaysState, update));
+        const allowAlways = new AllowAlwaysStore((sessionKey) => normalizeAllowAlwaysState(extensionValue(api, sessionKey, ALLOW_ALWAYS_NAMESPACE)), (sessionKey, update) => patchExtension(api, sessionKey, ALLOW_ALWAYS_NAMESPACE, { version: ALLOW_ALWAYS_STATE_VERSION, grants: {} }, normalizeAllowAlwaysState, update), config.allowAlwaysTtlMs);
         const approvalWindow = new ApprovalWindowStore((sessionKey) => normalizeWindowState(extensionValue(api, sessionKey, WINDOW_NAMESPACE)), (sessionKey, update) => patchExtension(api, sessionKey, WINDOW_NAMESPACE, { version: WINDOW_STATE_VERSION, windows: {} }, normalizeWindowState, update));
         // The same event object is passed to every ordinary hook. Capture the
         // gate-time snapshot by object identity so an intervening handler cannot
@@ -353,7 +353,7 @@ const pluginEntry = definePluginEntry({
             if (sessionKey &&
                 config.rememberAllowAlways &&
                 fingerprint?.grantKey &&
-                allowAlways.isGranted(sessionKey, fingerprint)) {
+                allowAlways.isGranted(sessionKey, fingerprint, Date.now())) {
                 log.debug?.(logPayload("human-gate: allow-always grant hit", {
                     rule: decision.rule?.id,
                     tool: event.toolName,
@@ -426,7 +426,7 @@ const pluginEntry = definePluginEntry({
                             if (res === "allow-always" &&
                                 canRemember &&
                                 fingerprint?.grantKey) {
-                                await allowAlways.grant(sessionKey, fingerprint);
+                                await allowAlways.grant(sessionKey, fingerprint, Date.now());
                                 log.info(logPayload("human-gate: allow-always granted", {
                                     rule: decision.rule?.id,
                                     scopeDigest: fingerprint.grantKey.slice(0, 19),

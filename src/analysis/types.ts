@@ -27,6 +27,9 @@ export type RiskCategory =
   | "source-control"
   | "deployment"
   | "obfuscation"
+  | "dev-build"
+  | "dev-test"
+  | "dev-format"
   | "unknown";
 
 export interface RiskFinding {

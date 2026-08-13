@@ -10,6 +10,7 @@ export const DEFAULT_CONFIG = {
     defaultSeverity: "warning",
     defaultTimeoutMs: 300_000,
     rememberAllowAlways: true,
+    allowAlwaysTtlMs: 14_400_000,
     useClassifiers: true,
     semanticAnalysis: {
         enabled: true,

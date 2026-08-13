@@ -2,7 +2,7 @@
 
 import type { AuthorizationFingerprint } from "./scope.js";
 
-export const ALLOW_ALWAYS_STATE_VERSION = 2 as const;
+export const ALLOW_ALWAYS_STATE_VERSION = 3 as const;
 const MAX_GRANTS = 128;
 
 export interface AllowAlwaysGrant {
@@ -10,6 +10,9 @@ export interface AllowAlwaysGrant {
   fingerprintVersion: number;
   rulesetVersion: string;
   grantedAt: string;
+  /** Hard upper bound: allow-always is a bounded session/task lease, never an
+   * unlimited grant. Old grants without this field are discarded on load. */
+  expiresAt: string;
 }
 
 export interface AllowAlwaysState {
@@ -41,11 +44,18 @@ function normalizeState(value: AllowAlwaysState | undefined): AllowAlwaysState {
       raw.fingerprintKey !== key || raw.fingerprintVersion !== 2 ||
       typeof raw.rulesetVersion !== "string" || raw.rulesetVersion.length === 0 ||
       raw.rulesetVersion.trim() !== raw.rulesetVersion ||
-      typeof raw.grantedAt !== "string" || !Number.isFinite(Date.parse(raw.grantedAt))
+      typeof raw.grantedAt !== "string" || !Number.isFinite(Date.parse(raw.grantedAt)) ||
+      typeof raw.expiresAt !== "string" || !Number.isFinite(Date.parse(raw.expiresAt)) ||
+      Date.parse(raw.expiresAt) <= Date.parse(raw.grantedAt)
     ) {
       continue;
     }
-    grants[key] = { ...raw, fingerprintKey: key };
+    grants[key] = {
+      ...raw,
+      fingerprintKey: key,
+      grantedAt: raw.grantedAt,
+      expiresAt: raw.expiresAt,
+    };
   }
   return { version: ALLOW_ALWAYS_STATE_VERSION, grants };
 }
@@ -59,27 +69,31 @@ export class AllowAlwaysStore {
   constructor(
     private readonly read: SessionStateReader<AllowAlwaysState>,
     private readonly update: SessionStateUpdater<AllowAlwaysState>,
+    private readonly ttlMs: number,
   ) {}
 
-  isGranted(sessionKey: string, fingerprint: AuthorizationFingerprint): boolean {
-    if (!fingerprint.grantKey) return false;
+  isGranted(sessionKey: string, fingerprint: AuthorizationFingerprint, now: number): boolean {
+    if (!fingerprint.grantKey || !Number.isFinite(now)) return false;
     const state = normalizeState(this.read(sessionKey));
     const grant = state.grants[fingerprint.grantKey];
     return Boolean(
       grant &&
       grant.fingerprintKey === fingerprint.grantKey &&
       grant.fingerprintVersion === fingerprint.fingerprintVersion &&
-      grant.rulesetVersion === fingerprint.rulesetVersion,
+      grant.rulesetVersion === fingerprint.rulesetVersion &&
+      Date.parse(grant.expiresAt) > now,
     );
   }
 
-  async grant(sessionKey: string, fingerprint: AuthorizationFingerprint): Promise<void> {
-    if (!fingerprint.grantKey) return;
+  async grant(sessionKey: string, fingerprint: AuthorizationFingerprint, now: number): Promise<void> {
+    if (!fingerprint.grantKey || !Number.isFinite(now)) return;
+    if (!Number.isFinite(this.ttlMs) || this.ttlMs <= 0) return;
     const grant: AllowAlwaysGrant = {
       fingerprintKey: fingerprint.grantKey,
       fingerprintVersion: fingerprint.fingerprintVersion,
       rulesetVersion: fingerprint.rulesetVersion,
-      grantedAt: new Date().toISOString(),
+      grantedAt: new Date(now).toISOString(),
+      expiresAt: new Date(now + this.ttlMs).toISOString(),
     };
     await this.update(sessionKey, (current) => {
       const next = normalizeState(current);
