@@ -14,6 +14,18 @@ test("manifest security defaults match runtime defaults", async () => {
   assert.equal(properties.semanticAnalysis.properties.maxWrapperDepth.default, DEFAULT_CONFIG.semanticAnalysis.maxWrapperDepth);
   assert.equal(properties.previews.properties.maxDescriptionChars.default, DEFAULT_CONFIG.previews.maxDescriptionChars);
   assert.equal(properties.unattendedPolicy.properties.critical.default, DEFAULT_CONFIG.unattendedPolicy.critical);
+  const window = properties.approvalWindow.properties;
+  assert.equal(window.mode.default, DEFAULT_CONFIG.approvalWindow.mode);
+  assert.equal(window.ttlMs.default, DEFAULT_CONFIG.approvalWindow.ttlMs);
+  assert.equal(window.pathFallback.default, DEFAULT_CONFIG.approvalWindow.pathFallback);
+  assert.equal(window.bypassCritical.default, DEFAULT_CONFIG.approvalWindow.bypassCritical);
+  // OpenClaw's schema default application must not inject a legacy alias and
+  // override the safer runtime default.
+  assert.equal(Object.hasOwn(window.scope, "default"), false);
+  assert.equal(Object.hasOwn(window.match, "default"), false);
+  assert.deepEqual(window.scope.enum, ["destructive", "same-tool", "effect", "category", "path"]);
+  assert.deepEqual(window.pathFallback.enum, ["none", "category", "effect"]);
+  assert.match(window.match.description, /deprecated/i);
 });
 
 test("OpenClaw schema default application remains fail-closed", async () => {
@@ -30,6 +42,32 @@ test("OpenClaw schema default application remains fail-closed", async () => {
   assert.equal(resolved.defaultMode, "require-approval");
   assert.equal(resolved.semanticAnalysis.enabled, true);
   assert.equal(resolved.unattendedPolicy.critical, "block");
+  assert.equal(resolved.approvalWindow.scope, "path");
+  assert.equal(resolved.approvalWindow.pathFallback, "none");
+  assert.equal(Object.hasOwn(resolved.approvalWindow, "match"), false);
+});
+
+test("manifest accepts all semantic scopes and rejects unknown scope controls", async () => {
+  const manifest = JSON.parse(await readFile(new URL("../openclaw.plugin.json", import.meta.url), "utf8"));
+  const validate = (approvalWindow) => validateJsonSchemaValue({
+    schema: manifest.configSchema,
+    cacheKey: `human-gate-window-${JSON.stringify(approvalWindow)}`,
+    value: { approvalWindow },
+    applyDefaults: false,
+    cache: false,
+  });
+
+  for (const scope of ["destructive", "same-tool", "effect", "category", "path"]) {
+    assert.equal(validate({ scope }).ok, true, scope);
+  }
+  for (const pathFallback of ["none", "category", "effect"]) {
+    assert.equal(validate({ scope: "path", pathFallback }).ok, true, pathFallback);
+  }
+  assert.equal(validate({ match: "same-tool" }).ok, true);
+  assert.equal(validate({ match: "destructive" }).ok, true);
+  assert.equal(validate({ scope: "tool-and-path" }).ok, false);
+  assert.equal(validate({ scope: "path", pathFallback: "destructive" }).ok, false);
+  assert.equal(validate({ match: "path" }).ok, false);
 });
 
 test("manifest accepts the documented parameter matcher and rejects malformed forms", async () => {

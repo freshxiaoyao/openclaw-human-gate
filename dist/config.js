@@ -12,14 +12,35 @@ function resolveWindowConfig(raw) {
     if (!isObject(raw))
         return { ...d };
     const mode = raw.mode === "off" || raw.mode === "turn" || raw.mode === "time" ? raw.mode : d.mode;
-    const match = raw.match === "same-tool" || raw.match === "destructive" ? raw.match : d.match;
-    const ttlMs = typeof raw.ttlMs === "number"
-        ? Math.min(Math.max(raw.ttlMs, 1000), 3_600_000)
+    const explicitScope = raw.scope === "destructive" ||
+        raw.scope === "same-tool" ||
+        raw.scope === "effect" ||
+        raw.scope === "category" ||
+        raw.scope === "path"
+        ? raw.scope
+        : undefined;
+    const legacyMatch = raw.match === "same-tool" || raw.match === "destructive"
+        ? raw.match
+        : undefined;
+    const scope = explicitScope ?? legacyMatch ?? d.scope;
+    const pathFallback = raw.pathFallback === "none" ||
+        raw.pathFallback === "category" ||
+        raw.pathFallback === "effect"
+        ? raw.pathFallback
+        : d.pathFallback;
+    const ttlMs = typeof raw.ttlMs === "number" && Number.isFinite(raw.ttlMs)
+        ? Math.min(Math.max(Math.trunc(raw.ttlMs), 1000), 3_600_000)
         : d.ttlMs;
     const bypassCritical = typeof raw.bypassCritical === "boolean"
         ? raw.bypassCritical
         : d.bypassCritical;
-    return { mode, match, ttlMs, bypassCritical };
+    return {
+        mode,
+        scope,
+        pathFallback,
+        bypassCritical,
+        ttlMs,
+    };
 }
 function clampInteger(value, fallback, min, max) {
     if (typeof value !== "number" || !Number.isFinite(value))

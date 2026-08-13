@@ -1,7 +1,10 @@
 export const EMPTY_SEMANTIC_REPORT = {
     findings: [],
     effects: [],
-    windowEligible: true,
+    categories: [],
+    verifiedTargets: [],
+    complete: false,
+    windowEligible: false,
     analyzerIds: [],
 };
 //# sourceMappingURL=types.js.map

@@ -18,15 +18,167 @@ function executable(scan, invocationIndex) {
         return "";
     return normalizeExecutable(scan.invocations[invocationIndex]?.tokens[0]?.value ?? "");
 }
+const SUDO_SHORT_OPTIONS_WITH_VALUE = new Set([
+    "a", "C", "D", "g", "h", "p", "R", "r", "T", "t", "U", "u",
+]);
+const SUDO_LONG_OPTIONS_WITH_VALUE = new Set([
+    "auth-type", "chdir", "chroot", "close-from", "command-timeout", "group",
+    "host", "other-user", "prompt", "role", "type", "user",
+]);
+const DOAS_SHORT_OPTIONS_WITH_VALUE = new Set(["a", "C", "u"]);
+/** Find the delegated executable without mistaking an option value (for
+ * example `root` in `sudo -u root rm`) for the command. */
+function delegatedCommandIndex(command, args) {
+    const shortWithValue = command === "sudo"
+        ? SUDO_SHORT_OPTIONS_WITH_VALUE
+        : DOAS_SHORT_OPTIONS_WITH_VALUE;
+    let index = 0;
+    while (index < args.length) {
+        const arg = args[index] ?? "";
+        if (arg === "--")
+            return index + 1 < args.length ? index + 1 : undefined;
+        if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(arg)) {
+            index += 1;
+            continue;
+        }
+        if (arg.startsWith("--")) {
+            const equals = arg.indexOf("=");
+            const name = arg.slice(2, equals < 0 ? undefined : equals);
+            if (command === "sudo" && SUDO_LONG_OPTIONS_WITH_VALUE.has(name) && equals < 0) {
+                index += 2;
+            }
+            else {
+                index += 1;
+            }
+            continue;
+        }
+        if (arg.startsWith("-") && arg !== "-") {
+            let consumesNext = false;
+            for (let offset = 1; offset < arg.length; offset += 1) {
+                if (!shortWithValue.has(arg[offset] ?? ""))
+                    continue;
+                consumesNext = offset === arg.length - 1;
+                break;
+            }
+            index += consumesNext ? 2 : 1;
+            continue;
+        }
+        return index;
+    }
+    return undefined;
+}
+const ENV_OPTIONS_WITH_VALUE = new Set([
+    "-u", "--unset", "-C", "--chdir", "-S", "--split-string",
+]);
+const ENV_TERMINAL_OPTIONS = new Set(["--help", "--version"]);
+function envCommandIndex(args) {
+    let index = 0;
+    while (index < args.length) {
+        const arg = args[index] ?? "";
+        if (arg === "--")
+            return index + 1 < args.length ? index + 1 : undefined;
+        if (ENV_TERMINAL_OPTIONS.has(arg))
+            return undefined;
+        if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(arg)) {
+            index += 1;
+            continue;
+        }
+        if (/^-(?:u|C).+/.test(arg)) {
+            index += 1;
+            continue;
+        }
+        if (arg.startsWith("-S") && arg !== "-S")
+            return undefined;
+        const optionName = arg.split("=", 1)[0] ?? arg;
+        if (ENV_OPTIONS_WITH_VALUE.has(optionName)) {
+            if (optionName === "-S" || optionName === "--split-string") {
+                // The value is itself re-tokenized by env. Treat it as opaque rather
+                // than incorrectly authorizing or classifying its first word.
+                return undefined;
+            }
+            index += arg.includes("=") ? 1 : 2;
+            continue;
+        }
+        if (arg.startsWith("-") && arg !== "-") {
+            // Known flag-only forms include -i/-0/--ignore-environment/--null and
+            // --debug. Unknown options are skipped conservatively for risk finding;
+            // shell reuse remains disabled unless the complete intent is Git.
+            index += 1;
+            continue;
+        }
+        return index;
+    }
+    return undefined;
+}
+function commandBuiltinCommandIndex(args) {
+    let index = 0;
+    while (index < args.length) {
+        const arg = args[index] ?? "";
+        if (arg === "--")
+            return index + 1 < args.length ? index + 1 : undefined;
+        // `command -v/-V` queries metadata and does not execute the argument.
+        if (arg === "-v" || arg === "-V")
+            return undefined;
+        if (arg === "-p") {
+            index += 1;
+            continue;
+        }
+        if (arg.startsWith("-") && arg !== "-")
+            return undefined;
+        return index;
+    }
+    return undefined;
+}
+function nohupCommandIndex(args) {
+    if (args.length === 0 || args[0] === "--help" || args[0] === "--version")
+        return undefined;
+    return args[0] === "--" ? (args.length > 1 ? 1 : undefined) : 0;
+}
+function busyBoxAppletIndex(args) {
+    if (args.length === 0)
+        return undefined;
+    const first = args[0] ?? "";
+    // BusyBox has meta-options, but no generic `--` command delimiter. Only a
+    // non-option first argument is an applet name.
+    return first.startsWith("-") ? undefined : 0;
+}
+function effectiveInvocationParts(scan, invocationIndex) {
+    if (invocationIndex === undefined)
+        return { command: "", args: [] };
+    const invocation = scan.invocations[invocationIndex];
+    let command = executable(scan, invocationIndex);
+    let args = invocation?.tokens.slice(1).map((token) => token.value) ?? [];
+    // Static wrapper peeling is deliberately bounded. It is used only to find
+    // high-risk executables; dynamic tokens separately make analysis incomplete.
+    for (let depth = 0; depth < 16; depth += 1) {
+        let delegatedIndex;
+        if (command === "sudo" || command === "doas") {
+            delegatedIndex = delegatedCommandIndex(command, args);
+        }
+        else if (command === "env") {
+            delegatedIndex = envCommandIndex(args);
+        }
+        else if (command === "command") {
+            delegatedIndex = commandBuiltinCommandIndex(args);
+        }
+        else if (command === "nohup") {
+            delegatedIndex = nohupCommandIndex(args);
+        }
+        else if (command === "busybox" || command.startsWith("busybox.")) {
+            delegatedIndex = busyBoxAppletIndex(args);
+        }
+        else {
+            return { command, args };
+        }
+        if (delegatedIndex === undefined)
+            return { command: "", args: [] };
+        command = normalizeExecutable(args[delegatedIndex] ?? "");
+        args = args.slice(delegatedIndex + 1);
+    }
+    return { command: "", args: [] };
+}
 function effectiveExecutable(scan, invocationIndex) {
-    const command = executable(scan, invocationIndex);
-    if (command !== "sudo" && command !== "doas")
-        return command;
-    const args = invocationIndex === undefined
-        ? []
-        : scan.invocations[invocationIndex]?.tokens.slice(1).map((token) => token.value) ?? [];
-    const delegated = args.find((arg) => !arg.startsWith("-"));
-    return normalizeExecutable(delegated ?? command);
+    return effectiveInvocationParts(scan, invocationIndex).command;
 }
 function hasRemoteInterpreterPipeline(scan) {
     return scan.operators.some((operator) => operator.operator === "|" &&
@@ -38,8 +190,7 @@ function isFlag(token, short, long) {
 }
 function hasDestructiveRecursiveDelete(scan) {
     return scan.invocations.some((invocation) => {
-        const command = executable(scan, invocation.index);
-        const args = invocation.tokens.slice(1).map((token) => token.value);
+        const { command, args } = effectiveInvocationParts(scan, invocation.index);
         if (command === "rm") {
             return args.some((arg) => isFlag(arg, "r", "--recursive")) &&
                 args.some((arg) => isFlag(arg, "f", "--force"));
@@ -68,13 +219,54 @@ function anyInvocation(scans, predicate) {
         return predicate(parts.command, parts.args);
     }));
 }
+function anyEffectiveInvocation(scans, predicate) {
+    return scans.some((scan) => scan.invocations.some((invocation) => {
+        const parts = effectiveInvocationParts(scan, invocation.index);
+        return predicate(parts.command, parts.args);
+    }));
+}
+const GIT_GLOBAL_OPTIONS_WITH_VALUE = new Set([
+    "-C", "-c", "--config-env", "--exec-path", "--git-dir", "--namespace",
+    "--super-prefix", "--work-tree",
+]);
+function gitSubcommand(args) {
+    let index = 0;
+    while (index < args.length) {
+        const arg = args[index] ?? "";
+        if (arg === "--") {
+            index += 1;
+            break;
+        }
+        if (!arg.startsWith("-"))
+            break;
+        const optionName = arg.split("=", 1)[0] ?? arg;
+        if (GIT_GLOBAL_OPTIONS_WITH_VALUE.has(optionName) && !arg.includes("=")) {
+            // -Cpath and -cname=value carry their value in the same token.
+            if ((arg.startsWith("-C") || arg.startsWith("-c")) && arg.length > 2) {
+                index += 1;
+            }
+            else {
+                index += 2;
+            }
+        }
+        else {
+            index += 1;
+        }
+    }
+    const name = args[index]?.toLowerCase();
+    return name ? { name, index } : undefined;
+}
+function hasGitIntent(scans, intent) {
+    return anyEffectiveInvocation(scans, (command, args) => command === "git" && gitSubcommand(args)?.name === intent);
+}
 function hasGitForcePush(scans) {
-    return anyInvocation(scans, (command, args) => {
+    return anyEffectiveInvocation(scans, (command, args) => {
         if (command !== "git")
             return false;
-        const pushIndex = args.findIndex((arg) => arg.toLowerCase() === "push");
-        if (pushIndex < 0)
+        const subcommand = gitSubcommand(args);
+        if (subcommand?.name !== "push")
             return false;
+        const pushIndex = subcommand.index;
         return args.slice(pushIndex + 1).some((arg) => arg === "-f" || /^--force(?:-with-lease)?(?:=|$)/i.test(arg) || arg === "--mirror");
     });
 }
@@ -140,14 +332,7 @@ function hasOutputWrite(scans) {
         anyInvocation(scans, (command) => writers.has(command));
 }
 function wrappedCommand(scan, invocationIndex) {
-    let { command, args } = invocationParts(scan, invocationIndex);
-    if (command === "sudo" || command === "doas") {
-        const commandIndex = args.findIndex((arg) => !arg.startsWith("-"));
-        if (commandIndex < 0)
-            return undefined;
-        command = normalizeExecutable(args[commandIndex] ?? "");
-        args = args.slice(commandIndex + 1);
-    }
+    const { command, args } = effectiveInvocationParts(scan, invocationIndex);
     let marker;
     if (["sh", "bash", "zsh", "ksh", "csh", "dash"].includes(command)) {
         marker = args.findIndex((arg) => arg === "-c");
@@ -229,6 +414,26 @@ const RULES = [
         effect: "destructive",
         disablesWindow: true,
         matches: (_value, scans) => hasGitForcePush(scans),
+    },
+    {
+        id: "command.git-push",
+        category: "source-control",
+        severity: "warning",
+        confidence: "high",
+        title: "Git push writes to a remote repository",
+        explanation: "The command publishes local refs to a configured remote.",
+        effect: "network-write",
+        matches: (_value, scans) => hasGitIntent(scans, "push"),
+    },
+    {
+        id: "command.git-commit",
+        category: "source-control",
+        severity: "warning",
+        confidence: "high",
+        title: "Git commit writes local repository history",
+        explanation: "The command creates a commit in the local repository.",
+        effect: "local-write",
+        matches: (_value, scans) => hasGitIntent(scans, "commit"),
     },
     {
         id: "command.git-destructive-history",
@@ -328,6 +533,8 @@ export function extractCommand(context) {
     return undefined;
 }
 function supportsExecution(context) {
+    if (context.toolKind !== undefined || context.toolInputKind !== undefined)
+        return false;
     if (!extractCommand(context))
         return false;
     return EXECUTION_NAMES.test(context.toolName) ||
@@ -343,6 +550,24 @@ function findingFor(rule, excerpt) {
         explanation: rule.explanation,
         evidence: { source: "command", excerpt },
     };
+}
+/** A reusable semantic authorization must not be minted from a partially
+ * understood shell program. For the first production scope we only claim
+ * complete intent classification for one, non-dynamic Git commit/push
+ * invocation. Other commands are still risk-scanned but remain fail-closed. */
+function hasCompleteGitIntent(scans) {
+    const rootScans = scans.slice(0, 3);
+    return rootScans.length === 3 && rootScans.every((scan) => {
+        if (!scan.complete || scan.invocations.length !== 1 || scan.operators.length > 0 ||
+            scan.redirections.length > 0 || scan.tokens.some((token) => token.dynamic))
+            return false;
+        const invocation = scan.invocations[0];
+        const { command, args } = effectiveInvocationParts(scan, invocation?.index);
+        if (command !== "git")
+            return false;
+        const intent = gitSubcommand(args)?.name;
+        return intent === "commit" || intent === "push";
+    });
 }
 export class CommandAnalyzer {
     config;
@@ -360,8 +585,11 @@ export class CommandAnalyzer {
             return {
                 analyzerId: this.id,
                 findings: [],
-                effects: [],
-                windowEligible: true,
+                effects: ["unknown"],
+                categories: ["unknown"],
+                verifiedTargets: [],
+                complete: false,
+                windowEligible: false,
             };
         }
         const wasTruncated = extracted.value.length > this.config.maxCommandLength;
@@ -406,16 +634,42 @@ export class CommandAnalyzer {
                 evidence: { source: "command", excerpt },
             });
         }
+        const intentComplete = !wasTruncated &&
+            !bundle.wrapperLimitReached &&
+            !parseIncomplete &&
+            hasCompleteGitIntent(scans);
+        if (!intentComplete && !wasTruncated && !bundle.wrapperLimitReached && !parseIncomplete) {
+            findings.push({
+                id: "command.intent-incomplete",
+                category: "unknown",
+                severity: "warning",
+                confidence: "low",
+                title: "Command intent is not completely classified",
+                explanation: "Risk patterns were checked, but this command is outside the reusable semantic scope.",
+                evidence: { source: "command", excerpt },
+            });
+        }
         const critical = findings.some((finding) => finding.severity === "critical");
         const windowEligible = !wasTruncated &&
             !bundle.wrapperLimitReached &&
             !parseIncomplete &&
+            intentComplete &&
             !matchedRules.some((rule) => rule.disablesWindow);
-        const effects = [...new Set(matchedRules.map((rule) => rule.effect))];
+        const effects = [...new Set([
+                ...matchedRules.map((rule) => rule.effect),
+                ...(!intentComplete ? ["unknown"] : []),
+            ])];
+        const categories = [...new Set([
+                ...matchedRules.map((rule) => rule.category),
+                ...(!intentComplete ? ["unknown"] : []),
+            ])];
         return {
             analyzerId: this.id,
             findings,
             effects,
+            categories,
+            verifiedTargets: [],
+            complete: intentComplete,
             minimumMode: findings.length > 0 ? "require-approval" : undefined,
             minimumSeverity: critical ? "critical" : findings.length > 0 ? "warning" : undefined,
             windowEligible,

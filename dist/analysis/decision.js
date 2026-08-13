@@ -37,6 +37,12 @@ export function reduceDecision(base, report) {
         : semanticReason
             ? `${base.reason}; semantic risk: ${semanticReason.title}`
             : base.reason;
+    const reusableSemantics = report.complete &&
+        report.analyzerIds.length > 0 &&
+        report.effects.length > 0 &&
+        report.categories.length > 0 &&
+        !report.effects.includes("unknown") &&
+        !report.categories.includes("unknown");
     return {
         ...base,
         mode,
@@ -44,7 +50,10 @@ export function reduceDecision(base, report) {
         allowedDecisions,
         reason,
         semanticReport: report,
-        windowEligible: report.windowEligible && !critical,
+        // Reusable authorization is stricter than the one-shot decision. Empty,
+        // partial, or unknown semantics may still be approved once, but can never
+        // inherit an earlier approval or open a window for a later call.
+        windowEligible: reusableSemantics && report.windowEligible && !critical,
     };
 }
 //# sourceMappingURL=decision.js.map

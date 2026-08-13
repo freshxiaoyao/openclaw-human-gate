@@ -56,3 +56,8 @@
 - P1：npx/pnpm dlx/yarn dlx → code-execution 规则
 - P1：isFlag 方言化（PS 大小写不敏感）
 - P0（运维）：加 process 等只读工具白名单规则，消除日常误拦
+## Resolution in v0.3.0
+
+This file records the v0.2.0 review. The reported `sudo rm -rf /` criticality
+gap and the semantic-window limitation are fixed in v0.3.0 and covered by
+regression tests.

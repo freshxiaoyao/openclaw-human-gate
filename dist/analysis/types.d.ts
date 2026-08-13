@@ -21,10 +21,25 @@ export interface RiskFinding {
         excerpt?: string;
     };
 }
+/** A target extracted from an authoritative tool parameter or the complete
+ * patch payload. Host-derived paths are intentionally excluded: they are
+ * useful hints, but are not an authorization boundary. */
+export interface VerifiedTarget {
+    path: string;
+    targetKind: "file" | "directory";
+    source: "params" | "patch";
+    parameter?: string;
+}
 export interface AnalysisResult {
     analyzerId: string;
     findings: RiskFinding[];
     effects: ToolEffect[];
+    /** Complete category set; unlike findings, this is never presentation-capped. */
+    categories: RiskCategory[];
+    /** Targets parsed from authoritative input, never inferred from derivedPaths. */
+    verifiedTargets: VerifiedTarget[];
+    /** True only when the analyzer consumed all input needed for its result. */
+    complete: boolean;
     minimumMode?: GateMode;
     minimumSeverity?: GateSeverity;
     /** False means an earlier approval must never suppress this call. */
@@ -40,6 +55,10 @@ export interface ToolCallAnalyzer {
 export interface SemanticReport {
     findings: RiskFinding[];
     effects: ToolEffect[];
+    categories: RiskCategory[];
+    verifiedTargets: VerifiedTarget[];
+    /** False for an empty report or if any matching analyzer is incomplete. */
+    complete: boolean;
     minimumMode?: GateMode;
     minimumSeverity?: GateSeverity;
     windowEligible: boolean;

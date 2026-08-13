@@ -29,6 +29,9 @@ export class CodeModeAnalyzer {
                 analyzerId: this.id,
                 findings: [finding],
                 effects: ["unknown"],
+                categories: ["unknown"],
+                verifiedTargets: [],
+                complete: false,
                 minimumMode: "require-approval",
                 minimumSeverity: "warning",
                 windowEligible: false,
@@ -76,9 +79,18 @@ export class CodeModeAnalyzer {
             analyzerId: this.id,
             findings,
             effects: ["code-execution"],
+            categories: [...new Set([
+                    "execution",
+                    ...findings.map((finding) => finding.category),
+                ])],
+            verifiedTargets: [],
+            // MVP code inspection is pattern-based: arbitrary JavaScript or
+            // TypeScript can perform effects that are not statically enumerable.
+            // It may upgrade risk, but must never mint a reusable authorization.
+            complete: false,
             minimumMode: "require-approval",
             minimumSeverity: critical ? "critical" : "warning",
-            windowEligible: findings.length === 0 && !truncated,
+            windowEligible: false,
         };
     }
 }

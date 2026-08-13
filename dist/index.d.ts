@@ -2,8 +2,9 @@
  * openclaw-human-gate — Human-in-the-loop approval middleware.
  *
  * Strategy:
- *  - Register a `before_tool_call` hook (priority 60, after host-trusted
- *    policies but before most observation hooks).
+ *  - Register a `before_tool_call` gate (priority 60) plus a final parameter
+ *    sealer. The sealer restores the exact host params inspected by the gate
+ *    after ordinary lower-priority plugin rewrites.
  *  - Snapshot params, evaluate the base policy, then run upgrade-only semantic
  *    analyzers before any auto/grant/window decision.
  *  - auto -> pass through; block -> block with reason; require-approval

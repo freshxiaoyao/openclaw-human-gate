@@ -31,7 +31,8 @@ export const DEFAULT_CONFIG = {
     approvalWindow: {
         mode: "turn",
         ttlMs: 300_000,
-        match: "same-tool",
+        scope: "path",
+        pathFallback: "none",
         bypassCritical: true,
     },
     rules: [],

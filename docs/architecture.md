@@ -113,8 +113,12 @@ existing approval-window implementation.
 ## Preview security
 
 Only data already present in hook parameters is previewed. Human Gate does not
-read the filesystem because the hook has no authoritative workspace/cwd and
-additional reads could expose unrelated secrets.
+read the filesystem; additional reads could expose unrelated secrets and
+would introduce time-of-check/time-of-use ambiguity. Relative authorization
+targets require a host-authoritative execution cwd; an agent workspace path is
+not substituted for it. OpenClaw 2026.7.1 does not expose that cwd in plugin
+hook context, so relative paths intentionally produce no reusable fingerprint.
+Best-effort `derivedPaths` are preview hints only, never an authorization base.
 
 The preview pipeline removes ANSI/OSC sequences and unsafe control characters,
 marks bidirectional controls, redacts common tokens/credentials/private keys,
@@ -127,17 +131,28 @@ messages to untrusted channels.
 
 - Cron/heartbeat detection is a session-key heuristic because the hook exposes
   no authoritative trigger kind.
-- Non-critical `allow-always` remains scoped by `(rule, tool, session)`, and a
-  same-tool window remains broader than a parameter fingerprint. The next
-  increment should introduce semantic scope keys such as path root, remote,
-  environment, and Git ref.
+- Semantic window keys are versioned and include policy/tool identity. The
+  default path scope also includes complete effects/categories and an
+  analyzer-verified bounded exact set of lexical parent directories. Empty,
+  partial, or unknown reports do not produce reusable authorization.
+- `allow-always` uses a separate, narrower path-bound fingerprint even when a
+  broader compatibility window scope is configured. Legacy v1 grants and
+  windows are deliberately discarded.
+- Path normalization is lexical and performs no filesystem I/O. It cannot
+  resolve symlinks or junctions. Multiple targets are never collapsed into a
+  broader common ancestor.
+- Ordinary shell commands outside the narrowly classified Git commit/push
+  corpus do not open reusable semantic windows. The safe default is another
+  prompt, not a guessed command scope.
 - The scanner is not a complete shell AST. Here-documents, process substitution,
   aliases, functions, and runtime expansion remain intentionally untrusted.
 - Redaction patterns are bounded and best-effort.
-- If another higher-priority plugin already owns approval, host merge semantics
-  may choose that approval. Deployment documentation should treat hook priority
-  ordering as part of the security configuration.
+- A final ordinary-hook parameter seal restores the gate-time snapshot after
+  finite-priority plugin rewrites. The host exposes no reserved finalizer slot;
+  installed plugins are trusted in-process code, and another plugin can still
+  use the same non-finite priority or bypass hooks entirely. A future host-owned
+  final-params digest/finalizer remains the stronger boundary.
 
 An adaptive mode that auto-passes analyzed commands is explicitly deferred.
-It should only be considered after corpus-based false-negative measurement,
-semantic scope windows, and authoritative shell/runtime metadata are available.
+It should only be considered after corpus-based false-negative measurement and
+authoritative shell/runtime metadata are available.

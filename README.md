@@ -31,7 +31,8 @@ its own terminal UI; it reuses OpenClaw's.
 ## Features
 
 - **`before_tool_call` interception** — every tool call is classified before
-  execution via a priority-60 hook.
+  execution via a priority-60 gate, then a final ordinary-hook parameter seal
+  restores the exact payload that gate inspected.
 - **Built-in approval workflow** — selected calls pause the run and ask the
   human through OpenClaw's own approval surfaces (TUI / Control UI / chat
   `/approve`); no custom UI to learn.
@@ -40,19 +41,19 @@ its own terminal UI; it reuses OpenClaw's.
 - **Zero-config fail-closed defaults** — reads pass, destructive calls
   (`exec`, `apply_patch`, `code_mode_exec`) prompt, and anything unrecognised
   prompts too (`defaultMode: "require-approval"`).
-- **Approval window** — approving one destructive call auto-passes matching
-  calls for the rest of the turn (or a time box), so multi-step refactors
-  don't prompt once per file.
-- **Upgrade-only semantic analysis** — shell and Code Mode parameters are
-  inspected before approval. Remote pipe-to-shell, recursive forced deletion,
+- **Semantic approval window** — approving one analyzed call may auto-pass only
+  calls with the configured semantic fingerprint for the rest of the turn (or
+  a time box). The fail-closed default is directory-scoped.
+- **Upgrade-only semantic analysis** — shell, Code Mode, and file-mutation
+  parameters are inspected before approval. Remote pipe-to-shell, recursive forced deletion,
   force pushes, destructive infrastructure operations, production deployment,
   encoded execution, and likely credential exfiltration are promoted to
   `critical`. Semantic analysis never downgrades a policy decision.
 - **Content-aware approval previews** — command/code, write, edit, and
   `apply_patch` inputs receive bounded previews. Secrets, ANSI controls, and
   bidirectional Unicode controls are sanitized before display.
-- **`allow-always` per session** — grant once, skip re-prompting for that
-  session.
+- **Narrow `allow-always` grants** — remembered decisions are session-local and
+  available only when analysis produces a path-bound grant fingerprint.
 - **Auto-pass for cron / heartbeat** — scheduled runs are never blocked on an
   approval nobody can see; critical semantic risks fail immediately by default.
 - **`human_gate_ask` tool** — Claude Code-style "ask the human" for
@@ -67,8 +68,9 @@ and applying the decision. `deny`, `timeout`, and `cancelled` fail closed
 (blocked).
 
 This plugin is the **policy layer** on top of that mechanism: it decides which
-calls need approval, with what severity and timeout, and remembers
-`allow-always` decisions per session so the human is not re-prompted.
+calls need approval, with what severity and timeout, and can remember a
+path-bound `allow-always` decision per session when complete analysis supports
+a narrow grant fingerprint.
 
 ## Default posture (fail-closed)
 
@@ -130,35 +132,74 @@ own `<session>:heartbeat` key):
 ## Approval window (less popup fatigue)
 
 Gating every write means a multi-step task (refactor 10 files) prompts 10
-times. The approval window fixes this: after you approve **one** destructive
-call, further matching calls auto-pass for a turn or a time box.
+times. The approval window reduces that fatigue without treating every call to
+the same tool as equivalent. After approval, a call may auto-pass only when its
+versioned semantic fingerprint matches an open window.
 
 ```json5
 approvalWindow: {
   mode: "turn",          // "off" | "turn" | "time"  (default "turn")
-  match: "same-tool",    // "same-tool" (default) | "destructive"
+  scope: "path",         // default: exact analyzer-verified directory set
+  pathFallback: "none",  // "none" | "category" | "effect"
   ttlMs: 300000,         // for "time" mode only
   bypassCritical: true   // severity "critical" always prompts (e.g. prod deploys)
 }
 ```
 
-- `mode: "turn"` — once approved, same-class writes auto-pass for the rest of
+- `mode: "turn"` — once approved, matching fingerprints auto-pass for the rest of
   the current agent run; a new user turn resets. (default)
-- `mode: "time"` — once approved, same-class writes auto-pass for `ttlMs`.
-- `mode: "off"` — prompt every destructive call (per-call behavior).
-- `match: "same-tool"` — only the approved tool name shares the window (safer default; e.g. approving `apply_patch` does not auto-approve `exec`).
-- `match: "destructive"` — one shared window for all gated writes (broadest and lowest-friction; opt in deliberately).
+- `mode: "time"` — once approved, matching fingerprints auto-pass for `ttlMs`.
+- `mode: "off"` — prompt every gated call (per-call behavior).
+- `scope: "path"` — the safe default. The key includes tool/policy identity,
+  complete effect and category sets, and the sorted exact set of every
+  analyzer-verified target directory; it never collapses multiple directories
+  to a shared ancestor. File targets are parent-directory scoped, so
+  `C:\repo\src\foo.ts` can share with `C:\repo\src\bar.ts` but not with a
+  system, SSH, `.git`, or unrelated workspace directory. Normalization is
+  lexical and performs no filesystem reads. Relative targets require a
+  host-authoritative execution cwd; OpenClaw 2026.7.1 does not currently expose
+  that field to plugin hooks, so relative writes deliberately prompt again and
+  do not offer `allow-always`. Use absolute tool targets for reusable path
+  authorization until the host exposes resolved execution targets.
+- `scope: "category"` — includes tool/policy identity plus the complete effect
+  and finding-category sets.
+- `scope: "effect"` — includes tool/policy identity plus the complete effect
+  set.
+- `scope: "same-tool"` — compatibility scope keyed by the complete tool and
+  matched-policy identity, not just the visible tool name.
+- `scope: "destructive"` — legacy global compatibility window. This is the
+  broadest option; keep it only when deliberately preserving old behavior.
+- `pathFallback: "none"` — when a verified path scope cannot be built, do not
+  open a reusable window. `category` and `effect` are explicit broader opt-ins;
+  fallback windows are distinguishable from directly configured scopes.
 - `bypassCritical: true` — `severity: "critical"` calls (e.g. a `deploy-prod`
   rule) always prompt even when a window is open.
 
-The window is opened automatically when you approve a call (allow-once or
-allow-always). `deny` / `timeout` / `cancelled` do not open it. It is stored
-per session. This is separate from `allow-always`, which is a permanent
-per-(rule, tool) grant for the whole session.
+The window is opened only when you approve a call (`allow-once` or
+`allow-always`) **and** complete analysis produces a reusable fingerprint.
+Empty semantics, an `unknown` effect/category, partial or failed analysis, an
+unverified path with `pathFallback: "none"`, missing trusted session identity,
+or missing run identity in `turn` mode never open a window. `deny`, `timeout`,
+and `cancelled` do not open one.
 
-Semantic `critical` calls and calls whose input could only be analyzed
-partially bypass both approval windows and earlier `allow-always` grants. A
-critical approval does not offer `allow-always`.
+`allow-always` is stricter than a temporary window: the choice is offered and
+remembered only when Human Gate can construct a narrow path-bound grant
+fingerprint containing the full policy identity and semantic sets. A broad
+`destructive`, `effect`, or `category` window therefore cannot become a broad
+permanent grant. Semantic `critical` calls bypass reusable authorization and do
+not offer `allow-always`.
+
+### Migration from `match`
+
+Existing explicit values remain accepted: `match: "same-tool"` maps to
+`scope: "same-tool"`, and `match: "destructive"` maps to
+`scope: "destructive"`. If both fields are present, `scope` wins. New or
+unconfigured installations resolve to `scope: "path"` and
+`pathFallback: "none"`; `match` is deprecated and has no schema default.
+
+The fingerprint and persisted-state format is versioned. On upgrade, legacy
+v1 approval windows and remembered grants are intentionally discarded, so the
+next matching call asks for approval again instead of reviving a broader key.
 
 ## Parameter-aware semantic analysis
 
@@ -203,7 +244,11 @@ Bearer tokens, JWTs, private keys, ANSI escapes, control characters, and bidi
 controls are removed or marked before the final hard length limit is applied.
 Human Gate snapshots the parameters before analysis and returns that isolated
 snapshot with the approval result, binding the approved preview to the input
-handed back to the host.
+handed back to the host. A lowest-priority parameter-sealer hook also restores
+that gate-time snapshot after ordinary plugin rewrites, including in-place
+mutation. OpenClaw does not expose a reserved finalizer slot: installed plugins
+run as trusted in-process code, so a hostile plugin can still bypass any plugin
+policy and should not be installed.
 
 ## Install
 
@@ -215,7 +260,7 @@ openclaw plugins install openclaw-human-gate
 npm pack --pack-destination /tmp
 # uninstall first if an older version is installed, then install the new pack
 openclaw plugins uninstall human-gate
-openclaw plugins install npm-pack:/tmp/openclaw-human-gate-0.2.0.tgz
+openclaw plugins install npm-pack:/tmp/openclaw-human-gate-0.3.0.tgz
 
 # inspect
 openclaw plugins inspect human-gate --runtime --json
@@ -276,7 +321,8 @@ destructive toolKinds → name-token classifier → `defaultMode`. See
           },
           approvalWindow: {
             mode: "turn",
-            match: "same-tool",
+            scope: "path",
+            pathFallback: "none",
             ttlMs: 300000,
             bypassCritical: true
           },
@@ -416,12 +462,13 @@ plugin-callable TUI selector API. Chat is the selector.
 - `src/index.ts` — entry point; registers the approval `before_tool_call` hook,
   an `after_tool_call` observation hook, and the `human_gate_ask` tool.
 - `src/policy.ts` — rule-matching engine (pure).
-- `src/analysis/` — analyzer registry, quote-aware shell scanner, command and
-  Code Mode analyzers, and upgrade-only decision reducer.
+- `src/analysis/` — analyzer registry, quote-aware shell scanner, command,
+  Code Mode, and file-mutation analyzers, plus the upgrade-only reducer.
 - `src/preview/` — extensible preview providers, sanitization, redaction, and
   the OpenClaw text presenter.
 - `src/config.ts` — resolves `api.pluginConfig` over built-in defaults.
 - `src/state.ts` — per-session allow-always store backed by session extensions.
+- `src/scope.ts` — versioned semantic fingerprints and strict path-scope normalization.
 - `src/window.ts` — per-session approval window backed by session extensions.
 - `src/in-memory-handle.ts` — deprecated compatibility placeholder; no process-global session state is used.
 - `src/types.ts` — plugin config, rule types, and ask-tool parsing/formatting.
@@ -435,8 +482,9 @@ plugin-callable TUI selector API. Chat is the selector.
 - `block: true` is terminal and skips lower-priority hooks.
 - `params` rewriting (returning `{ params }`) is applied only after approval
   succeeds — useful for a future "Modify" path.
-- `allow-always` grants are scoped to a session via plugin-owned session
-  extensions and do not survive a new session. If a hook invocation has no
-  trusted `sessionKey`, Human Gate does not persist a grant or approval window.
+- `allow-always` grants are path-bound and scoped to a session via plugin-owned
+  session extensions; they do not survive a new session. If a hook invocation
+  has no trusted `sessionKey`, Human Gate does not persist a grant or approval
+  window.
 - Non-bundled plugins do not need `allowConversationAccess` for
   `before_tool_call`; it is only required for prompt-content hooks.

@@ -2,8 +2,9 @@
  * openclaw-human-gate — Human-in-the-loop approval middleware.
  *
  * Strategy:
- *  - Register a `before_tool_call` hook (priority 60, after host-trusted
- *    policies but before most observation hooks).
+ *  - Register a `before_tool_call` gate (priority 60) plus a final parameter
+ *    sealer. The sealer restores the exact host params inspected by the gate
+ *    after ordinary lower-priority plugin rewrites.
  *  - Snapshot params, evaluate the base policy, then run upgrade-only semantic
  *    analyzers before any auto/grant/window decision.
  *  - auto -> pass through; block -> block with reason; require-approval
@@ -37,27 +38,47 @@ import {
 } from "openclaw/plugin-sdk/plugin-entry";
 import {
   type HumanGateConfig,
-  allowAlwaysKey,
   parseAskInput,
   formatAskForChat,
   askDetails,
 } from "./types.js";
 import { resolveConfig } from "./config.js";
 import { evaluatePolicy, isAutoPassContext } from "./policy.js";
-import { type AllowAlwaysState, AllowAlwaysStore } from "./state.js";
-import { type WindowState, ApprovalWindowStore } from "./window.js";
+import {
+  ALLOW_ALWAYS_STATE_VERSION,
+  AllowAlwaysStore,
+  normalizeAllowAlwaysState,
+} from "./state.js";
+import {
+  WINDOW_STATE_VERSION,
+  ApprovalWindowStore,
+  normalizeWindowState,
+} from "./window.js";
 import { CommandAnalyzer } from "./analysis/command.js";
 import { CodeModeAnalyzer } from "./analysis/code.js";
-import { reduceDecision } from "./analysis/decision.js";
+import { FileMutationAnalyzer } from "./analysis/file-mutation.js";
+import { reduceDecision, type EffectiveDecision } from "./analysis/decision.js";
 import { AnalyzerRegistry } from "./analysis/registry.js";
 import { EMPTY_SEMANTIC_REPORT, type ToolCallContext } from "./analysis/types.js";
 import { ApprovalPresenter } from "./preview/presenter.js";
+import {
+  createAuthorizationFingerprint,
+  createPolicyIdentity,
+  type AuthorizationFingerprint,
+} from "./scope.js";
 
 const PLUGIN_ID = "human-gate";
 const ASK_TOOL_NAME = "human_gate_ask";
-const ALLOW_ALWAYS_NAMESPACE = "allow-always";
-const WINDOW_NAMESPACE = "approval-window";
+const ALLOW_ALWAYS_NAMESPACE = "allow-always-v2";
+const WINDOW_NAMESPACE = "approval-window-v2";
 const HOOK_PRIORITY = 60;
+// OpenClaw runs typed hooks in descending numeric priority. There is no public
+// finalizer hook, so this ordinary-hook compatibility seal deliberately sorts
+// after every finite-priority handler. Installed plugins remain trusted code;
+// the SDK cannot reserve an absolute final slot against another -Infinity hook.
+const PARAM_SEAL_PRIORITY = Number.NEGATIVE_INFINITY;
+/** Bump whenever semantic effects/categories/target derivation changes. */
+const SEMANTIC_RULESET_VERSION = "2026-08-14.1";
 
 function logPayload(message: string, details: Record<string, unknown>): string {
   return `${message} ${JSON.stringify(details)}`;
@@ -82,6 +103,8 @@ type BeforeToolCallEvent = {
 
 type ToolCallHookContext = {
   agentId?: string;
+  /** Host-authoritative working directory for this tool execution. */
+  cwd?: string;
   sessionKey?: string;
   sessionId?: string;
   runId?: string;
@@ -97,35 +120,6 @@ type ToolCallHookContext = {
     roleIds?: readonly string[];
   };
 };
-
-function parseAllowAlwaysState(value: unknown): AllowAlwaysState | undefined {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
-  const grants = (value as { grants?: unknown }).grants;
-  if (!grants || typeof grants !== "object" || Array.isArray(grants)) return undefined;
-  const normalized: Record<string, string> = {};
-  for (const [key, timestamp] of Object.entries(grants)) {
-    if (typeof timestamp === "string") normalized[key] = timestamp;
-  }
-  return { grants: normalized };
-}
-
-function parseWindowState(value: unknown): WindowState | undefined {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
-  const windows = (value as { windows?: unknown }).windows;
-  if (!windows || typeof windows !== "object" || Array.isArray(windows)) return undefined;
-  const normalized: WindowState["windows"] = {};
-  for (const [key, entry] of Object.entries(windows)) {
-    if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
-    const openedAt = (entry as { openedAt?: unknown }).openedAt;
-    const runId = (entry as { runId?: unknown }).runId;
-    if (typeof openedAt !== "number" || !Number.isFinite(openedAt)) continue;
-    normalized[key] = {
-      openedAt,
-      ...(typeof runId === "string" ? { runId } : {}),
-    };
-  }
-  return { windows: normalized };
-}
 
 function extensionValue(
   api: OpenClawPluginApi,
@@ -171,15 +165,160 @@ function truncate(text: string, max: number): string {
   return text.length <= max ? text : `${text.slice(0, Math.max(0, max - 1))}…`;
 }
 
+interface SnapshotBudget {
+  nodes: number;
+  stringChars: number;
+}
+
+type SnapshotResult = { ok: true; value: unknown } | { ok: false };
+
+function cloneJsonLike(
+  value: unknown,
+  seen: Set<object>,
+  budget: SnapshotBudget,
+  depth: number,
+): SnapshotResult {
+  budget.nodes += 1;
+  if (budget.nodes > 100_000 || depth > 64) return { ok: false };
+  if (value === undefined || value === null || typeof value === "boolean") {
+    return { ok: true, value };
+  }
+  if (typeof value === "string") {
+    budget.stringChars += value.length;
+    return budget.stringChars <= 16 * 1024 * 1024
+      ? { ok: true, value }
+      : { ok: false };
+  }
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? { ok: true, value } : { ok: false };
+  }
+  if (typeof value !== "object" || seen.has(value)) return { ok: false };
+
+  let prototype: object | null;
+  let keys: PropertyKey[];
+  try {
+    prototype = Object.getPrototypeOf(value) as object | null;
+    keys = Reflect.ownKeys(value);
+  } catch {
+    return { ok: false };
+  }
+  const array = Array.isArray(value);
+  if (array ? prototype !== Array.prototype : prototype !== Object.prototype && prototype !== null) {
+    return { ok: false };
+  }
+  seen.add(value);
+  try {
+    if (array) {
+      if (keys.some((key) => typeof key !== "string" || (key !== "length" && !/^(?:0|[1-9][0-9]*)$/.test(key)))) {
+        return { ok: false };
+      }
+      const output: unknown[] = [];
+      for (let index = 0; index < value.length; index += 1) {
+        const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+        if (!descriptor || !("value" in descriptor) || !descriptor.enumerable) return { ok: false };
+        const cloned = cloneJsonLike(descriptor.value, seen, budget, depth + 1);
+        if (!cloned.ok) return cloned;
+        output.push(cloned.value);
+      }
+      return { ok: true, value: output };
+    }
+
+    const output: Record<string, unknown> = {};
+    for (const key of keys) {
+      if (typeof key !== "string") return { ok: false };
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      if (!descriptor || !("value" in descriptor) || !descriptor.enumerable) return { ok: false };
+      const cloned = cloneJsonLike(descriptor.value, seen, budget, depth + 1);
+      if (!cloned.ok) return cloned;
+      Object.defineProperty(output, key, {
+        value: cloned.value,
+        enumerable: true,
+        configurable: true,
+        writable: true,
+      });
+    }
+    return { ok: true, value: output };
+  } finally {
+    seen.delete(value);
+  }
+}
+
 function snapshotParams(params: Record<string, unknown>): Record<string, unknown> | undefined {
   try {
-    const cloned = structuredClone(params);
-    return cloned && typeof cloned === "object" && !Array.isArray(cloned)
-      ? cloned
+    const cloned = cloneJsonLike(params, new Set<object>(), { nodes: 0, stringChars: 0 }, 0);
+    return cloned.ok && cloned.value && typeof cloned.value === "object" && !Array.isArray(cloned.value)
+      ? cloned.value as Record<string, unknown>
       : undefined;
   } catch {
     return undefined;
   }
+}
+
+function policyIdentityFor(
+  decision: EffectiveDecision,
+  config: HumanGateConfig,
+): string | undefined {
+  const rule = decision.rule;
+  return createPolicyIdentity({
+    source: decision.source,
+    rule: {
+      id: rule?.id ?? null,
+      toolName: rule?.toolName ?? null,
+      toolNamePattern: rule?.toolNamePattern ?? null,
+      toolKind: rule?.toolKind ?? null,
+      paramMatcher: rule?.paramMatcher ?? null,
+      mode: rule?.mode ?? null,
+      severity: rule?.severity ?? null,
+      allowedDecisions: rule?.allowedDecisions
+        ? [...rule.allowedDecisions].sort()
+        : null,
+      timeoutMs: rule?.timeoutMs ?? null,
+    },
+    effective: {
+      mode: decision.mode,
+      severity: decision.severity,
+      timeoutMs: decision.timeoutMs,
+      allowedDecisions: [...decision.allowedDecisions].sort(),
+    },
+    semanticAnalysis: {
+      enabled: config.semanticAnalysis.enabled,
+      maxCommandLength: config.semanticAnalysis.maxCommandLength,
+      maxWrapperDepth: config.semanticAnalysis.maxWrapperDepth,
+    },
+  });
+}
+
+function fingerprintFor(
+  config: HumanGateConfig,
+  event: BeforeToolCallEvent,
+  ctx: ToolCallHookContext,
+  decision: EffectiveDecision,
+  isParamScopedRule: boolean,
+): AuthorizationFingerprint | undefined {
+  if (!decision.windowEligible || isParamScopedRule || !decision.rule) return undefined;
+  const policyIdentity = policyIdentityFor(decision, config);
+  if (!policyIdentity) return undefined;
+  return createAuthorizationFingerprint({
+    toolName: event.toolName,
+    toolKind: event.toolKind ?? "unspecified",
+    toolInputKind: event.toolInputKind ?? "unspecified",
+    ruleId: decision.rule.id,
+    policyIdentity,
+    effects: decision.semanticReport.effects,
+    categories: decision.semanticReport.categories,
+    verifiedTargets: decision.semanticReport.verifiedTargets.map(({ path, targetKind }) => ({
+      path,
+      targetKind,
+    })),
+    // workspaceDir/resolveAgentWorkspaceDir are diagnostic locations, not the
+    // authoritative execution cwd. Without ctx.cwd, relative paths fail closed.
+    executionCwd: typeof ctx.cwd === "string" ? ctx.cwd : undefined,
+    analysisComplete: decision.semanticReport.complete,
+  }, {
+    scope: config.approvalWindow.scope,
+    pathFallback: config.approvalWindow.pathFallback,
+    rulesetVersion: SEMANTIC_RULESET_VERSION,
+  });
 }
 
 const pluginEntry: OpenClawPluginDefinition = definePluginEntry({
@@ -194,6 +333,7 @@ const pluginEntry: OpenClawPluginDefinition = definePluginEntry({
     const analyzerRegistry = new AnalyzerRegistry(
       [
         new CodeModeAnalyzer(config.semanticAnalysis),
+        new FileMutationAnalyzer(config.semanticAnalysis),
         new CommandAnalyzer(config.semanticAnalysis),
       ],
       config.semanticAnalysis.maxFindings,
@@ -211,7 +351,7 @@ const pluginEntry: OpenClawPluginDefinition = definePluginEntry({
 
     const allowAlways = new AllowAlwaysStore(
       (sessionKey) =>
-        parseAllowAlwaysState(
+        normalizeAllowAlwaysState(
           extensionValue(api, sessionKey, ALLOW_ALWAYS_NAMESPACE),
         ),
       (sessionKey, update) =>
@@ -219,24 +359,28 @@ const pluginEntry: OpenClawPluginDefinition = definePluginEntry({
           api,
           sessionKey,
           ALLOW_ALWAYS_NAMESPACE,
-          { grants: {} },
-          parseAllowAlwaysState,
+          { version: ALLOW_ALWAYS_STATE_VERSION, grants: {} },
+          normalizeAllowAlwaysState,
           update,
         ),
     );
     const approvalWindow = new ApprovalWindowStore(
       (sessionKey) =>
-        parseWindowState(extensionValue(api, sessionKey, WINDOW_NAMESPACE)),
+        normalizeWindowState(extensionValue(api, sessionKey, WINDOW_NAMESPACE)),
       (sessionKey, update) =>
         patchExtension(
           api,
           sessionKey,
           WINDOW_NAMESPACE,
-          { windows: {} },
-          parseWindowState,
+          { version: WINDOW_STATE_VERSION, windows: {} },
+          normalizeWindowState,
           update,
         ),
     );
+    // The same event object is passed to every ordinary hook. Capture the
+    // gate-time snapshot by object identity so an intervening handler cannot
+    // defeat the final seal by mutating event.params in place.
+    const parameterSeals = new WeakMap<BeforeToolCallEvent, Record<string, unknown>>();
 
     // ── Primary approval gate (priority 60) ──
     api.on(
@@ -272,6 +416,7 @@ const pluginEntry: OpenClawPluginDefinition = definePluginEntry({
           }));
           return { block: true, blockReason };
         }
+        parameterSeals.set(event, paramsSnapshot);
         const analysisContext: ToolCallContext = {
           toolName: event.toolName,
           toolKind: event.toolKind,
@@ -286,6 +431,13 @@ const pluginEntry: OpenClawPluginDefinition = definePluginEntry({
         const isParamScopedRule = decision.source === "user" &&
           decision.rule !== undefined &&
           Object.prototype.hasOwnProperty.call(decision.rule, "paramMatcher");
+        const fingerprint = fingerprintFor(
+          config,
+          event,
+          ctx,
+          decision,
+          isParamScopedRule,
+        );
 
         log.debug?.(logPayload("human-gate: evaluated", {
           tool: event.toolName,
@@ -293,14 +445,16 @@ const pluginEntry: OpenClawPluginDefinition = definePluginEntry({
           mode: decision.mode,
           rule: decision.rule?.id,
           findings: decision.semanticReport.findings.map((finding) => finding.id),
+          semanticComplete: decision.semanticReport.complete,
+          reusableScope: fingerprint?.resolvedScope,
           sessionId: ctx.sessionId,
         }));
 
         if (decision.mode === "auto") {
-          // A parameter-scoped auto decision is bound to the exact JSON-safe
-          // snapshot that matched. This prevents the host from executing a
-          // subsequently mutated action under an earlier narrow decision.
-          return isParamScopedRule ? { params: paramsSnapshot } : undefined;
+          // Every pass is bound to the exact JSON-safe snapshot that was
+          // classified. The final sealer below restores this snapshot after
+          // ordinary lower-priority plugin parameter rewrites.
+          return { params: paramsSnapshot };
         }
 
         // block is unconditional: a tool the operator explicitly banned must
@@ -344,21 +498,21 @@ const pluginEntry: OpenClawPluginDefinition = definePluginEntry({
             tool: event.toolName,
             sessionKey,
           }));
-          return undefined;
+          return { params: paramsSnapshot };
         }
         // 1) permanent allow-always grant
         if (
           sessionKey &&
-          decision.windowEligible &&
           config.rememberAllowAlways &&
-          decision.rule &&
-          allowAlways.isGranted(sessionKey, decision.rule.id, event.toolName)
+          fingerprint?.grantKey &&
+          allowAlways.isGranted(sessionKey, fingerprint)
         ) {
           log.debug?.(logPayload("human-gate: allow-always grant hit", {
-            rule: decision.rule.id,
+            rule: decision.rule?.id,
             tool: event.toolName,
+            scope: fingerprint.resolvedScope,
           }));
-          return undefined;
+          return { params: paramsSnapshot };
         }
 
         // 2) approval window (turn / time scoped) — suppresses popup fatigue
@@ -366,22 +520,28 @@ const pluginEntry: OpenClawPluginDefinition = definePluginEntry({
         const now = Date.now();
         if (
           sessionKey &&
-          decision.windowEligible &&
-          !isParamScopedRule &&
+          fingerprint &&
           !approvalWindow.bypasses(win, decision) &&
-          approvalWindow.isOpen(win, sessionKey, event.toolName, ctx.runId, now)
+          approvalWindow.isOpen(win, sessionKey, fingerprint, ctx.runId, now)
         ) {
           log.debug?.(logPayload("human-gate: approval-window auto-pass", {
             tool: event.toolName,
             mode: win.mode,
-            match: win.match,
+            requestedScope: fingerprint.requestedScope,
+            resolvedScope: fingerprint.resolvedScope,
             runId: ctx.runId,
           }));
-          return undefined;
+          return { params: paramsSnapshot };
         }
 
         const title = truncate(`Approve ${event.toolName}`, 80);
         const description = presenter.describe(analysisContext, decision);
+        const canRemember = Boolean(
+          sessionKey && config.rememberAllowAlways && fingerprint?.grantKey,
+        );
+        const allowedDecisions = canRemember
+          ? [...decision.allowedDecisions]
+          : decision.allowedDecisions.filter((item) => item !== "allow-always");
 
         return {
           // Bind the approval to the exact params that were analyzed and shown.
@@ -393,7 +553,7 @@ const pluginEntry: OpenClawPluginDefinition = definePluginEntry({
             timeoutMs: decision.timeoutMs,
             timeoutBehavior: "deny" as const,
             timeoutReason: "Human Gate approval timed out",
-            allowedDecisions: decision.allowedDecisions,
+            allowedDecisions,
             pluginId: PLUGIN_ID,
             onResolution: async (res: ApprovalResolution) => {
               try {
@@ -410,37 +570,36 @@ const pluginEntry: OpenClawPluginDefinition = definePluginEntry({
                 // matching calls.
                 if (
                   (res === "allow-once" || res === "allow-always") &&
-                  decision.windowEligible &&
-                  !isParamScopedRule &&
+                  fingerprint &&
                   !approvalWindow.bypasses(win, decision)
                 ) {
-                  await approvalWindow.open(
+                  const opened = await approvalWindow.open(
                     win,
                     sessionKey,
-                    event.toolName,
+                    fingerprint,
                     ctx.runId,
                     Date.now(),
                   );
-                  log.info(logPayload("human-gate: approval window opened", {
-                    mode: win.mode,
-                    match: win.match,
-                    runId: ctx.runId,
-                    sessionId: ctx.sessionId,
-                  }));
+                  if (opened) {
+                    log.info(logPayload("human-gate: approval window opened", {
+                      mode: win.mode,
+                      requestedScope: fingerprint.requestedScope,
+                      resolvedScope: fingerprint.resolvedScope,
+                      scopeDigest: fingerprint.windowKey.slice(0, 17),
+                      runId: ctx.runId,
+                      sessionId: ctx.sessionId,
+                    }));
+                  }
                 }
                 if (
                   res === "allow-always" &&
-                  decision.windowEligible &&
-                  decision.rule &&
-                  config.rememberAllowAlways
+                  canRemember &&
+                  fingerprint?.grantKey
                 ) {
-                  await allowAlways.grant(
-                    sessionKey,
-                    decision.rule.id,
-                    event.toolName,
-                  );
+                  await allowAlways.grant(sessionKey, fingerprint);
                   log.info(logPayload("human-gate: allow-always granted", {
-                    key: allowAlwaysKey(decision.rule.id, event.toolName),
+                    rule: decision.rule?.id,
+                    scopeDigest: fingerprint.grantKey.slice(0, 19),
                     sessionId: ctx.sessionId,
                   }));
                 } else {
@@ -451,9 +610,8 @@ const pluginEntry: OpenClawPluginDefinition = definePluginEntry({
                   }));
                 }
               } catch (err) {
-                // State persistence failure must not create a wider grant. The
-                // approved current call may continue, but subsequent calls will
-                // prompt again because no state was recorded.
+                // Reuse begins only after the session-extension update
+                // succeeds, so persistence failure creates no authorization.
                 log.error(logPayload("human-gate: failed to persist approval state", {
                   error: String(err),
                   decision: res,
@@ -466,6 +624,30 @@ const pluginEntry: OpenClawPluginDefinition = definePluginEntry({
         };
       },
       { priority: HOOK_PRIORITY, timeoutMs: 60_000 },
+    );
+
+    // OpenClaw currently has no public final-params/finalizer hook. Ordinary
+    // before_tool_call handlers all receive the same host-adjusted event, and
+    // later handler results can otherwise replace params after a window/grant
+    // hit. Re-snapshotting the original event at the final numeric priority
+    // makes the analyzed payload the last ordinary params decision. A prior
+    // requireApproval from another plugin remains authoritative by host design.
+    api.on(
+      "before_tool_call",
+      (event: BeforeToolCallEvent) => {
+        if (event.toolName === ASK_TOOL_NAME) return undefined;
+        const paramsSnapshot = parameterSeals.get(event);
+        parameterSeals.delete(event);
+        if (!paramsSnapshot) {
+          const blockReason = "Human Gate parameter seal is missing";
+          log.warn(logPayload("human-gate: blocking tool call without a parameter seal", {
+            tool: event.toolName,
+          }));
+          return { block: true, blockReason };
+        }
+        return { params: paramsSnapshot };
+      },
+      { priority: PARAM_SEAL_PRIORITY, timeoutMs: 10_000 },
     );
 
     // ── Observation hook ──
@@ -559,6 +741,7 @@ const pluginEntry: OpenClawPluginDefinition = definePluginEntry({
 
     log.info(logPayload("human-gate: registered approval gate + ask tool", {
       hookPriority: HOOK_PRIORITY,
+      parameterSealPriority: String(PARAM_SEAL_PRIORITY),
       askTool: ASK_TOOL_NAME,
     }));
   },

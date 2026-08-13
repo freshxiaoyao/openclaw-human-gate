@@ -79,9 +79,8 @@ export interface HumanGateConfig {
     previews: ApprovalPreviewConfig;
     /** Behavior for critical calls in contexts where nobody can approve. */
     unattendedPolicy: UnattendedPolicyConfig;
-    /** Approval window: after the human approves one destructive call, further
-     *  matching calls auto-pass for a turn or a time box, so a multi-step write
-     *  task does not prompt once per file. */
+    /** Approval window: after the human approves one completely analyzed call,
+     *  matching semantic fingerprints may auto-pass for a turn or time box. */
     approvalWindow: ApprovalWindowConfig;
     /** Ordered policy rules. First match wins. */
     rules: GateRule[];
@@ -116,16 +115,18 @@ export interface UnattendedPolicyConfig {
 }
 /** Reduces popup fatigue for multi-step write tasks. */
 export interface ApprovalWindowConfig {
-    /** "off" = prompt every destructive call (per-call behavior).
-     *  "turn" = after one approval, same-class calls auto-pass for the rest of
-     *           the current agent run (keyed by runId; a new user turn resets).
-     *  "time" = after one approval, same-class calls auto-pass for ttlMs. */
+    /** "off" = prompt every gated call (per-call behavior).
+     *  "turn" = matching fingerprints auto-pass for the current agent run.
+     *  "time" = matching fingerprints auto-pass until their fixed expiry. */
     mode: "off" | "turn" | "time";
     /** Time-box duration for mode "time". Ignored otherwise. */
     ttlMs: number;
-    /** "destructive" = any gated write shares one window (broadest, least
-     *  prompting). "same-tool" = only the same toolName shares the window. */
-    match: "destructive" | "same-tool";
+    /** Semantic authorization boundary. Every semantic scope retains the full
+     * tool identity, so it can only narrow the legacy same-tool behavior. */
+    scope: "destructive" | "same-tool" | "effect" | "category" | "path";
+    /** Explicit behavior when `scope: "path"` has no verified absolute target.
+     * `none` is fail-closed and opens no reusable authorization. */
+    pathFallback: "none" | "category" | "effect";
     /** When true (default), severity "critical" calls always prompt even if a
      *  window is open (e.g. production deploys never get auto-passed). */
     bypassCritical: boolean;

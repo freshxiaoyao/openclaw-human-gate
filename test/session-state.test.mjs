@@ -4,6 +4,7 @@ import test from "node:test";
 import { resolveConfig } from "../dist/config.js";
 import { AllowAlwaysStore } from "../dist/state.js";
 import { ApprovalWindowStore } from "../dist/window.js";
+import { createAuthorizationFingerprint } from "../dist/scope.js";
 
 function createSessionBackend(defaultValue) {
   const state = new Map();
@@ -15,6 +16,24 @@ function createSessionBackend(defaultValue) {
       state.set(sessionKey, update(state.get(sessionKey) ?? structuredClone(defaultValue)));
     },
   };
+}
+
+function windowFingerprint(path = "C:\\repo\\src\\file.ts") {
+  return createAuthorizationFingerprint({
+    toolName: "write_file",
+    toolKind: "write",
+    toolInputKind: "write",
+    ruleId: "builtin:write",
+    policyIdentity: "policy-v1",
+    effects: ["local-write"],
+    categories: ["filesystem"],
+    verifiedTargets: [{ path, targetKind: "file" }],
+    analysisComplete: true,
+  }, {
+    scope: "path",
+    pathFallback: "none",
+    rulesetVersion: "rules-v1",
+  });
 }
 
 test("resolveConfig honors api.pluginConfig values", () => {
@@ -42,52 +61,55 @@ test("resolveConfig honors api.pluginConfig values", () => {
   assert.equal(cfg.previews.redactSecrets, false);
   assert.equal(cfg.unattendedPolicy.critical, "auto");
   assert.equal(cfg.approvalWindow.mode, "off");
-  assert.equal(cfg.approvalWindow.match, "destructive");
+  assert.equal(cfg.approvalWindow.scope, "destructive");
+  assert.equal(cfg.approvalWindow.pathFallback, "none");
+  assert.equal(Object.hasOwn(cfg.approvalWindow, "match"), false);
   assert.equal(cfg.approvalWindow.ttlMs, 1234);
   assert.deepEqual(cfg.autoPassSessionKeys, []);
   assert.equal(cfg.rules[0]?.id, "deny-all");
 });
 
 test("allow-always grants are isolated by sessionKey", async () => {
-  const backend = createSessionBackend({ grants: {} });
+  const backend = createSessionBackend({ version: 2, grants: {} });
   const store = new AllowAlwaysStore(backend.read, backend.update);
+  const fp = windowFingerprint();
 
-  await store.grant("session-a", "rule", "write_file");
+  await store.grant("session-a", fp);
 
-  assert.equal(store.isGranted("session-a", "rule", "write_file"), true);
-  assert.equal(store.isGranted("session-b", "rule", "write_file"), false);
+  assert.equal(store.isGranted("session-a", fp), true);
+  assert.equal(store.isGranted("session-b", fp), false);
 });
 
 test("time approval windows are isolated by sessionKey", async () => {
-  const backend = createSessionBackend({ windows: {} });
+  const backend = createSessionBackend({ version: 2, windows: {} });
   const store = new ApprovalWindowStore(backend.read, backend.update);
+  const fp = windowFingerprint();
   const cfg = {
     mode: "time",
     ttlMs: 300_000,
-    match: "same-tool",
     bypassCritical: true,
   };
 
-  await store.open(cfg, "session-a", "write_file", "run-a", 1000);
+  await store.open(cfg, "session-a", fp, "run-a", 1000);
 
-  assert.equal(store.isOpen(cfg, "session-a", "write_file", "run-a", 1001), true);
-  assert.equal(store.isOpen(cfg, "session-b", "write_file", "run-b", 1001), false);
+  assert.equal(store.isOpen(cfg, "session-a", fp, "run-a", 1001), true);
+  assert.equal(store.isOpen(cfg, "session-b", fp, "run-b", 1001), false);
 });
 
 test("turn windows require the same run within the same session", async () => {
-  const backend = createSessionBackend({ windows: {} });
+  const backend = createSessionBackend({ version: 2, windows: {} });
   const store = new ApprovalWindowStore(backend.read, backend.update);
+  const fp = windowFingerprint();
   const cfg = {
     mode: "turn",
     ttlMs: 300_000,
-    match: "same-tool",
     bypassCritical: true,
   };
 
-  await store.open(cfg, "session-a", "apply_patch", "run-a", 1000);
+  await store.open(cfg, "session-a", fp, "run-a", 1000);
 
-  assert.equal(store.isOpen(cfg, "session-a", "apply_patch", "run-a", 1001), true);
-  assert.equal(store.isOpen(cfg, "session-a", "apply_patch", "run-b", 1001), false);
-  assert.equal(store.isOpen(cfg, "session-b", "apply_patch", "run-a", 1001), false);
-  assert.equal(store.isOpen(cfg, "session-a", "apply_patch", undefined, 1001), false);
+  assert.equal(store.isOpen(cfg, "session-a", fp, "run-a", 1001), true);
+  assert.equal(store.isOpen(cfg, "session-a", fp, "run-b", 1001), false);
+  assert.equal(store.isOpen(cfg, "session-b", fp, "run-a", 1001), false);
+  assert.equal(store.isOpen(cfg, "session-a", fp, undefined, 1001), false);
 });
