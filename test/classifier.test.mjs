@@ -253,6 +253,25 @@ test("matches regex operator matches string parameters only", () => {
   assert.equal(evaluatePolicy("exec", undefined, cfg, { command: 123 }).mode, APPROVAL);
 });
 
+test("matches regex operator is case-insensitive (PowerShell cmdlets, exes)", () => {
+  const cfg = config({
+    rules: [{
+      id: "readonly-case",
+      toolName: "exec",
+      paramMatcher: {
+        all: [{ key: "command", matches: "^(cat|get-childitem)$" }],
+      },
+      mode: "auto",
+    }],
+  });
+
+  assert.equal(evaluatePolicy("exec", undefined, cfg, { command: "cat" }).mode, "auto");
+  assert.equal(evaluatePolicy("exec", undefined, cfg, { command: "CAT" }).mode, "auto");
+  assert.equal(evaluatePolicy("exec", undefined, cfg, { command: "Get-ChildItem" }).mode, "auto");
+  assert.equal(evaluatePolicy("exec", undefined, cfg, { command: "get-childitem" }).mode, "auto");
+  assert.equal(evaluatePolicy("exec", undefined, cfg, { command: "rm" }).mode, APPROVAL);
+});
+
 test("invalid, accessor, inherited, and prototype-injected matchers never match", () => {
   const invalidMatchers = [
     {},

@@ -160,8 +160,14 @@ function conditionMatches(condition, toolParams) {
     if (Object.prototype.hasOwnProperty.call(condition, "matches")) {
         if (typeof descriptor.value !== "string")
             return false;
-        const re = compilePattern(ownDataValue(condition, "matches"));
-        return re ? re.test(descriptor.value) : false;
+        const source = ownDataValue(condition, "matches");
+        try {
+            // Command matching is case-insensitive (PowerShell cmdlets, exes).
+            return new RegExp(source, "i").test(descriptor.value);
+        }
+        catch {
+            return false;
+        }
     }
     const candidates = ownDataValue(condition, "in");
     return Array.isArray(candidates) &&
