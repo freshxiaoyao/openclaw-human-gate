@@ -987,3 +987,132 @@ test("an approved window is not reusable until extension persistence succeeds", 
     "the window becomes reusable only after durable persistence succeeds",
   );
 });
+
+// ── Adaptive auto-pass (off / shadow / suggest / enforce) ──
+
+function adaptiveEvent(toolCallId) {
+  return { toolName: "writeFile", params: { path: "C:\\repo\\src\\a.ts" }, toolCallId };
+}
+
+function adaptiveCtx(sessionKey = "agent:main:adaptive", runId = "run-adaptive") {
+  return { agentId: "main", cwd: "C:\\repo", sessionKey, runId };
+}
+
+function adaptivePluginConfig(mode, overrides = {}) {
+  return {
+    defaultMode: "require-approval",
+    rememberAllowAlways: true,
+    // Isolate adaptive behavior from the legacy approval window so a shadow or
+    // suggest test cannot accidentally auto-pass via a turn/time window.
+    approvalWindow: { mode: "off" },
+    adaptiveAutoPass: { mode, ttlMs: 900_000, maxUses: 5, suggestAfterApprovals: 2, ...overrides },
+  };
+}
+
+async function loadAdaptiveHandler(mode, backend, overrides = {}) {
+  const entry = await loadPlugin();
+  const { api, calls } = createMockApi({
+    pluginConfig: adaptivePluginConfig(mode, overrides),
+    backend,
+  });
+  await entry.register(api);
+  return hookFor(calls, "before_tool_call");
+}
+
+test("shadow mode never auto-passes and leaves the approval in place", async () => {
+  const handler = await loadAdaptiveHandler("shadow", createSessionBackend());
+  const result = await handler(adaptiveEvent("call-1"), adaptiveCtx());
+  assert.ok(result?.requireApproval, "shadow must still require approval");
+});
+
+test("suggest mode never auto-passes and surfaces a hint only after the threshold", async () => {
+  const handler = await loadAdaptiveHandler("suggest", createSessionBackend());
+  const ctx = adaptiveCtx();
+
+  const first = await handler(adaptiveEvent("call-1"), ctx);
+  assert.ok(first?.requireApproval);
+  assert.ok(!first.requireApproval.description.includes("Adaptive preview"));
+  await first.requireApproval.onResolution("allow-once");
+
+  const second = await handler(adaptiveEvent("call-2"), ctx);
+  assert.ok(second?.requireApproval);
+  assert.ok(!second.requireApproval.description.includes("Adaptive preview"));
+  await second.requireApproval.onResolution("allow-once");
+
+  const third = await handler(adaptiveEvent("call-3"), ctx);
+  assert.ok(third?.requireApproval, "suggest must still require approval");
+  assert.ok(third.requireApproval.description.includes("Adaptive preview"));
+});
+
+test("enforce + allow-once does not create a lease; the next matching call prompts", async () => {
+  const handler = await loadAdaptiveHandler("enforce", createSessionBackend());
+  const ctx = adaptiveCtx();
+
+  const first = await handler(adaptiveEvent("call-1"), ctx);
+  assert.ok(first?.requireApproval);
+  assert.ok(first.requireApproval.allowedDecisions.includes("allow-always"));
+  await first.requireApproval.onResolution("allow-once");
+
+  const second = await handler(adaptiveEvent("call-2"), ctx);
+  assert.ok(second?.requireApproval, "allow-once must not create an adaptive lease");
+});
+
+test("enforce + allow-always creates a lease; exact matches consume one use each", async () => {
+  const handler = await loadAdaptiveHandler("enforce", createSessionBackend(), { maxUses: 2 });
+  const ctx = adaptiveCtx();
+
+  const first = await handler(adaptiveEvent("call-1"), ctx);
+  assert.ok(first?.requireApproval);
+  assert.ok(first.requireApproval.description.includes("Adaptive:"), "enforce surfaces a lease hint");
+  assert.ok(first.requireApproval.description.length <= 512, "description stays within host limit");
+  await first.requireApproval.onResolution("allow-always");
+
+  assert.deepEqual(await handler(adaptiveEvent("call-2"), ctx), { params: { path: "C:\\repo\\src\\a.ts" } });
+  assert.deepEqual(await handler(adaptiveEvent("call-3"), ctx), { params: { path: "C:\\repo\\src\\a.ts" } });
+  assert.ok((await handler(adaptiveEvent("call-4"), ctx))?.requireApproval, "exhausted lease must prompt");
+});
+
+test("enforce ignores a pre-existing legacy allow-always grant", async () => {
+  const backend = createSessionBackend();
+
+  // In off mode, allow-always persists a legacy grant in allow-always-v2.
+  const offHandler = await loadAdaptiveHandler("off", backend);
+  const first = await offHandler(adaptiveEvent("call-1"), adaptiveCtx());
+  assert.ok(first?.requireApproval);
+  await first.requireApproval.onResolution("allow-always");
+
+  // Enforce mode on the same session must not inherit that legacy grant.
+  const enforceHandler = await loadAdaptiveHandler("enforce", backend);
+  const result = await enforceHandler(adaptiveEvent("call-2"), adaptiveCtx());
+  assert.ok(result?.requireApproval, "enforce must ignore the legacy allow-always grant");
+});
+
+test("enforce + deny revokes and leaves no trust behind", async () => {
+  const handler = await loadAdaptiveHandler("enforce", createSessionBackend(), { maxUses: 1 });
+  const ctx = adaptiveCtx();
+
+  const first = await handler(adaptiveEvent("call-1"), ctx);
+  await first.requireApproval.onResolution("allow-always"); // lease: 1 use
+
+  // Consume the single use.
+  assert.deepEqual(await handler(adaptiveEvent("call-2"), ctx), { params: { path: "C:\\repo\\src\\a.ts" } });
+
+  // Exhausted → prompt → deny revokes.
+  const exhausted = await handler(adaptiveEvent("call-3"), ctx);
+  assert.ok(exhausted?.requireApproval, "exhausted lease must prompt");
+  await exhausted.requireApproval.onResolution("deny");
+
+  // No trust remains.
+  assert.ok((await handler(adaptiveEvent("call-4"), ctx))?.requireApproval, "deny revokes; a fresh allow-always is required");
+});
+
+test("enforce + cancel never creates a lease", async () => {
+  const handler = await loadAdaptiveHandler("enforce", createSessionBackend());
+  const ctx = adaptiveCtx();
+
+  const fresh = await handler(adaptiveEvent("call-1"), ctx);
+  assert.ok(fresh?.requireApproval);
+  await fresh.requireApproval.onResolution("cancelled");
+
+  assert.ok((await handler(adaptiveEvent("call-2"), ctx))?.requireApproval, "cancel never increases trust");
+});
