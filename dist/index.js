@@ -56,7 +56,7 @@ const HOOK_PRIORITY = 60;
 // the SDK cannot reserve an absolute final slot against another -Infinity hook.
 const PARAM_SEAL_PRIORITY = Number.NEGATIVE_INFINITY;
 /** Bump whenever semantic effects/categories/target derivation changes. */
-const SEMANTIC_RULESET_VERSION = "2026-08-14.2";
+const SEMANTIC_RULESET_VERSION = "2026-08-14.3";
 function logPayload(message, details) {
     return `${message} ${JSON.stringify(details)}`;
 }
@@ -264,7 +264,7 @@ const pluginEntry = definePluginEntry({
         });
         const allowAlways = new AllowAlwaysStore((sessionKey) => normalizeAllowAlwaysState(extensionValue(api, sessionKey, ALLOW_ALWAYS_NAMESPACE)), (sessionKey, update) => patchExtension(api, sessionKey, ALLOW_ALWAYS_NAMESPACE, { version: ALLOW_ALWAYS_STATE_VERSION, grants: {} }, normalizeAllowAlwaysState, update), config.allowAlwaysTtlMs);
         const approvalWindow = new ApprovalWindowStore((sessionKey) => normalizeWindowState(extensionValue(api, sessionKey, WINDOW_NAMESPACE)), (sessionKey, update) => patchExtension(api, sessionKey, WINDOW_NAMESPACE, { version: WINDOW_STATE_VERSION, windows: {} }, normalizeWindowState, update));
-        const adaptiveLease = new AdaptiveLeaseStore((sessionKey) => normalizeAdaptiveState(extensionValue(api, sessionKey, ADAPTIVE_NAMESPACE)), (sessionKey, update) => patchExtension(api, sessionKey, ADAPTIVE_NAMESPACE, { version: ADAPTIVE_STATE_VERSION, observations: {}, leases: {} }, normalizeAdaptiveState, update), config.adaptiveAutoPass);
+        const adaptiveLease = new AdaptiveLeaseStore((sessionKey) => normalizeAdaptiveState(extensionValue(api, sessionKey, ADAPTIVE_NAMESPACE)), (sessionKey, update) => patchExtension(api, sessionKey, ADAPTIVE_NAMESPACE, { version: ADAPTIVE_STATE_VERSION, observations: {}, receipts: {}, leases: {} }, normalizeAdaptiveState, update), config.adaptiveAutoPass);
         // The same event object is passed to every ordinary hook. Capture the
         // gate-time snapshot by object identity so an intervening handler cannot
         // defeat the final seal by mutating event.params in place.
@@ -323,9 +323,10 @@ const pluginEntry = definePluginEntry({
                     toolCallId: event.toolCallId,
                     rememberAllowAlways: config.rememberAllowAlways,
                 });
-            // Freeze ownership at gate time. Once enforce owns an eligible call,
-            // a lease miss/error must never fall through to a legacy grant/window.
-            const adaptiveOwns = adaptiveMode === "enforce" && adaptiveEligibility?.eligible === true;
+            // Freeze ownership at gate time. Once enforce owns a semantically
+            // safe-file call, a lease miss/error must never fall through to a
+            // legacy grant/window, even when no lease can be minted right now.
+            const adaptiveOwns = adaptiveMode === "enforce" && adaptiveEligibility?.semanticEligible === true;
             log.debug?.(logPayload("human-gate: evaluated", {
                 tool: event.toolName,
                 toolKind: event.toolKind,
@@ -384,28 +385,33 @@ const pluginEntry = definePluginEntry({
             }
             const win = config.approvalWindow;
             const now = Date.now();
-            if (adaptiveOwns && fingerprint && sessionKey) {
-                try {
-                    const consumed = await adaptiveLease.consume(sessionKey, fingerprint, now);
-                    log.debug?.(logPayload("human-gate: adaptive lease consume", {
-                        tool: event.toolName,
-                        outcome: consumed.outcome,
-                        scopeDigest: fingerprint.grantKey?.slice(0, 19),
-                        remainingBefore: consumed.remainingBefore,
-                        remainingAfter: consumed.remainingAfter,
-                        legacySuppressed: true,
-                    }));
-                    if (consumed.outcome === "consumed")
-                        return { params: paramsSnapshot };
-                }
-                catch {
-                    // Store failure is an authorization miss. Do not expose exception
-                    // text (which may contain host paths/state); continue to approval.
-                    log.error(logPayload("human-gate: adaptive lease consume failed", {
-                        tool: event.toolName,
-                        outcome: "store-error",
-                        legacySuppressed: true,
-                    }));
+            if (adaptiveOwns) {
+                // Semantically adaptive-owned calls never fall back to legacy
+                // grants/windows, even when no lease can be minted right now
+                // (missing toolCallId, session, or durable grant key).
+                if (fingerprint && sessionKey) {
+                    try {
+                        const consumed = await adaptiveLease.consume(sessionKey, fingerprint, now);
+                        log.debug?.(logPayload("human-gate: adaptive lease consume", {
+                            tool: event.toolName,
+                            outcome: consumed.outcome,
+                            scopeDigest: fingerprint.grantKey?.slice(0, 19),
+                            remainingBefore: consumed.remainingBefore,
+                            remainingAfter: consumed.remainingAfter,
+                            legacySuppressed: true,
+                        }));
+                        if (consumed.outcome === "consumed")
+                            return { params: paramsSnapshot };
+                    }
+                    catch {
+                        // Store failure is an authorization miss. Do not expose exception
+                        // text (which may contain host paths/state); continue to approval.
+                        log.error(logPayload("human-gate: adaptive lease consume failed", {
+                            tool: event.toolName,
+                            outcome: "store-error",
+                            legacySuppressed: true,
+                        }));
+                    }
                 }
             }
             else {
@@ -525,7 +531,7 @@ const pluginEntry = definePluginEntry({
                             else if (adaptiveOwns &&
                                 res === "deny" &&
                                 fingerprint) {
-                                await adaptiveLease.revoke(sessionKey, fingerprint);
+                                await adaptiveLease.deny(sessionKey, fingerprint);
                                 log.info(logPayload("human-gate: adaptive lease revoked", {
                                     decision: res,
                                     tool: event.toolName,
@@ -560,7 +566,7 @@ const pluginEntry = definePluginEntry({
                                 adaptiveEligibility?.eligible &&
                                 fingerprint &&
                                 res === "deny") {
-                                await adaptiveLease.revoke(sessionKey, fingerprint);
+                                await adaptiveLease.deny(sessionKey, fingerprint);
                             }
                         }
                         catch (err) {

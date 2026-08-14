@@ -1,7 +1,7 @@
 import type { EffectiveDecision } from "../analysis/decision.js";
 import type { AuthorizationFingerprint } from "../scope.js";
 
-export const ADAPTIVE_ELIGIBILITY_VERSION = "safe-file-v1" as const;
+export const ADAPTIVE_ELIGIBILITY_VERSION = "safe-file-v2" as const;
 
 export type AdaptiveIneligibleReason =
   | "not-require-approval"
@@ -35,7 +35,22 @@ export interface AdaptiveEligibility {
   reasonCodes: AdaptiveIneligibleReason[];
   fingerprint?: AuthorizationFingerprint;
   targetCount: number;
+  /** True when every *semantic* precondition passes (the call is a safe-file
+   * write) regardless of whether a lease can be minted right now. Adaptive
+   * ownership is decided on this flag, never on `eligible`, so a missing
+   * optional toolCallId/session can never fall back to a legacy grant. */
+  semanticEligible: boolean;
 }
+
+/** Reasons that concern *whether a lease can be issued/tracked right now*, not
+ * what the call is. They exclude a call from `eligible` but never from
+ * `semanticEligible`. */
+const LEASE_ISSUANCE_REASONS: ReadonlySet<AdaptiveIneligibleReason> = new Set([
+  "missing-path-fingerprint",
+  "missing-session",
+  "remember-disabled",
+  "missing-tool-call-id",
+]);
 
 function exactSet(values: readonly string[], expected: readonly string[]): boolean {
   const actualSet = new Set(values);
@@ -45,14 +60,18 @@ function exactSet(values: readonly string[], expected: readonly string[]): boole
   return [...actualSet].every((value) => expectedSet.has(value));
 }
 
-/** Absolute means independent of process cwd. In particular, `C:foo` and
- * `\\foo` are rejected even though some platform helpers treat them as rooted. */
+const IS_WINDOWS = process.platform === "win32";
+
+/** Absolute means independent of process cwd AND correct for the host
+ * platform. On Windows a leading-slash path (`/foo`) is drive-relative and
+ * must not mint a lease; on POSIX, drive-letter and UNC paths are not
+ * absolute. `C:foo` and `\foo` remain rejected on every platform. */
 export function isStrictAbsoluteTarget(value: string): boolean {
   if (value.length === 0 || value.trim() !== value || /[\0\r\n]/.test(value)) return false;
   if (/^(?:\\\\|\/\/)[?.][\\/]/.test(value)) return false;
-  if (/^[A-Za-z]:[\\/]/.test(value)) return true;
-  if (/^(?:\\\\|\/\/)[^\\/]+[\\/][^\\/]+(?:[\\/]|$)/.test(value)) return true;
-  return value.startsWith("/") && !value.startsWith("//");
+  if (/^[A-Za-z]:[\\/]/.test(value)) return IS_WINDOWS;
+  if (/^(?:\\\\|\/\/)[^\\/]+[\\/][^\\/]+(?:[\\/]|$)/.test(value)) return IS_WINDOWS;
+  return !IS_WINDOWS && value.startsWith("/") && !value.startsWith("//");
 }
 
 /**
@@ -97,5 +116,6 @@ export function evaluateAdaptiveEligibility(
     reasonCodes: reasons,
     ...(reasons.length === 0 && fingerprint ? { fingerprint } : {}),
     targetCount: report.verifiedTargets.length,
+    semanticEligible: !reasons.some((reason) => !LEASE_ISSUANCE_REASONS.has(reason)),
   };
 }

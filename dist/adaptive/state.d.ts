@@ -1,13 +1,17 @@
 import type { ApprovalDecision, AdaptiveAutoPassConfig } from "../types.js";
 import { type AuthorizationFingerprint } from "../scope.js";
 import { ADAPTIVE_ELIGIBILITY_VERSION } from "./eligibility.js";
-export declare const ADAPTIVE_STATE_VERSION: 1;
+export declare const ADAPTIVE_STATE_VERSION: 2;
 export interface AdaptiveObservation {
     fingerprintKey: string;
     approvalCount: number;
     lastApprovedAt: string;
-    /** Bounded replay tombstones for approval callbacks. */
-    grantOriginToolCallIds: string[];
+}
+/** Permanent replay receipts. Never evicted FIFO-style; capacity is fail-closed. */
+export interface AdaptiveReceipt {
+    fingerprintKey: string;
+    originToolCallIds: string[];
+    lastGrantedAt: string;
 }
 export interface AdaptiveLease {
     fingerprintKey: string;
@@ -25,6 +29,7 @@ export interface AdaptiveLease {
 export interface AdaptiveState {
     version: typeof ADAPTIVE_STATE_VERSION;
     observations: Record<string, AdaptiveObservation>;
+    receipts: Record<string, AdaptiveReceipt>;
     leases: Record<string, AdaptiveLease>;
 }
 export type AdaptiveStateReader = (sessionKey: string) => AdaptiveState | undefined;
@@ -47,7 +52,7 @@ export declare class AdaptiveLeaseStore {
     observeApproval(sessionKey: string, fingerprint: AuthorizationFingerprint, decision: ApprovalDecision, now: number): Promise<void>;
     grant(sessionKey: string, fingerprint: AuthorizationFingerprint, now: number, originToolCallId: string | undefined): Promise<boolean>;
     consume(sessionKey: string, fingerprint: AuthorizationFingerprint, now: number): Promise<AdaptiveConsumeResult>;
-    revoke(sessionKey: string, fingerprint: AuthorizationFingerprint): Promise<void>;
+    deny(sessionKey: string, fingerprint: AuthorizationFingerprint): Promise<void>;
     snapshot(sessionKey: string): AdaptiveState;
 }
 //# sourceMappingURL=state.d.ts.map

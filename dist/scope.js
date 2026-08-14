@@ -4,6 +4,7 @@ export const AUTHORIZATION_FINGERPRINT_VERSION = 2;
 /** Bound path fingerprints so a single approval cannot create unbounded state. */
 export const MAX_PATH_SCOPE_DIRECTORIES = 64;
 const MAX_PATH_SCOPE_TARGETS = 128;
+const IS_WINDOWS = process.platform === "win32";
 function strictToken(value) {
     if (typeof value !== "string" || value.length === 0 || value.trim() !== value) {
         return undefined;
@@ -54,6 +55,8 @@ function parseAbsolutePath(value, allowRoot = false) {
         return undefined;
     const drive = /^([A-Za-z]):[\\/](.*)$/.exec(value);
     if (drive) {
+        if (!IS_WINDOWS)
+            return undefined;
         const segments = parseSegments(drive[2] ?? "", true);
         if (!segments || (!allowRoot && segments.length === 0))
             return undefined;
@@ -65,6 +68,8 @@ function parseAbsolutePath(value, allowRoot = false) {
     }
     const unc = /^(?:\\\\|\/\/)([^\\/]+)[\\/]([^\\/]+)(?:[\\/](.*))?$/.exec(value);
     if (unc) {
+        if (!IS_WINDOWS)
+            return undefined;
         const server = unc[1].toLowerCase();
         const share = unc[2].toLowerCase();
         if (server === "." || server === ".." || share === "." || share === ".." ||
@@ -79,6 +84,8 @@ function parseAbsolutePath(value, allowRoot = false) {
     }
     // `//` was considered as UNC above. An invalid UNC must not silently become
     // a POSIX path with a broader interpretation.
+    if (IS_WINDOWS)
+        return undefined;
     if (!value.startsWith("/") || value.startsWith("//"))
         return undefined;
     const segments = parseSegments(value.slice(1), false);

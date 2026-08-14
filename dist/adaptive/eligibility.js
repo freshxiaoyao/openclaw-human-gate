@@ -1,4 +1,13 @@
-export const ADAPTIVE_ELIGIBILITY_VERSION = "safe-file-v1";
+export const ADAPTIVE_ELIGIBILITY_VERSION = "safe-file-v2";
+/** Reasons that concern *whether a lease can be issued/tracked right now*, not
+ * what the call is. They exclude a call from `eligible` but never from
+ * `semanticEligible`. */
+const LEASE_ISSUANCE_REASONS = new Set([
+    "missing-path-fingerprint",
+    "missing-session",
+    "remember-disabled",
+    "missing-tool-call-id",
+]);
 function exactSet(values, expected) {
     const actualSet = new Set(values);
     const expectedSet = new Set(expected);
@@ -8,18 +17,21 @@ function exactSet(values, expected) {
         return false;
     return [...actualSet].every((value) => expectedSet.has(value));
 }
-/** Absolute means independent of process cwd. In particular, `C:foo` and
- * `\\foo` are rejected even though some platform helpers treat them as rooted. */
+const IS_WINDOWS = process.platform === "win32";
+/** Absolute means independent of process cwd AND correct for the host
+ * platform. On Windows a leading-slash path (`/foo`) is drive-relative and
+ * must not mint a lease; on POSIX, drive-letter and UNC paths are not
+ * absolute. `C:foo` and `\foo` remain rejected on every platform. */
 export function isStrictAbsoluteTarget(value) {
     if (value.length === 0 || value.trim() !== value || /[\0\r\n]/.test(value))
         return false;
     if (/^(?:\\\\|\/\/)[?.][\\/]/.test(value))
         return false;
     if (/^[A-Za-z]:[\\/]/.test(value))
-        return true;
+        return IS_WINDOWS;
     if (/^(?:\\\\|\/\/)[^\\/]+[\\/][^\\/]+(?:[\\/]|$)/.test(value))
-        return true;
-    return value.startsWith("/") && !value.startsWith("//");
+        return IS_WINDOWS;
+    return !IS_WINDOWS && value.startsWith("/") && !value.startsWith("//");
 }
 /**
  * Closed eligibility predicate for the first adaptive MVP. It intentionally
@@ -71,6 +83,7 @@ export function evaluateAdaptiveEligibility(input) {
         reasonCodes: reasons,
         ...(reasons.length === 0 && fingerprint ? { fingerprint } : {}),
         targetCount: report.verifiedTargets.length,
+        semanticEligible: !reasons.some((reason) => !LEASE_ISSUANCE_REASONS.has(reason)),
     };
 }
 //# sourceMappingURL=eligibility.js.map

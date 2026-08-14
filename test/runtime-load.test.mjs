@@ -1087,6 +1087,25 @@ test("enforce ignores a pre-existing legacy allow-always grant", async () => {
   assert.ok(result?.requireApproval, "enforce must ignore the legacy allow-always grant");
 });
 
+test("enforce + missing toolCallId still suppresses a pre-existing legacy grant", async () => {
+  const backend = createSessionBackend();
+
+  // In off mode, allow-always persists a legacy grant in allow-always-v2.
+  const offHandler = await loadAdaptiveHandler("off", backend);
+  const first = await offHandler(adaptiveEvent("call-1"), adaptiveCtx());
+  assert.ok(first?.requireApproval);
+  await first.requireApproval.onResolution("allow-always");
+
+  // Enforce mode, same path but no toolCallId: the call is semantically owned
+  // by adaptive, so it must prompt rather than inherit the legacy grant.
+  const enforceHandler = await loadAdaptiveHandler("enforce", backend);
+  const result = await enforceHandler(
+    { toolName: "writeFile", params: { path: "C:\\repo\\src\\a.ts" } },
+    adaptiveCtx(),
+  );
+  assert.ok(result?.requireApproval, "missing toolCallId must still suppress the legacy grant");
+});
+
 test("enforce + deny revokes and leaves no trust behind", async () => {
   const handler = await loadAdaptiveHandler("enforce", createSessionBackend(), { maxUses: 1 });
   const ctx = adaptiveCtx();

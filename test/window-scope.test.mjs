@@ -125,41 +125,51 @@ test("missing, unknown, or incomplete semantics never produce a key", () => {
 });
 
 test("path scopes normalize component prefixes for POSIX, DOS, and UNC paths", () => {
-  assert.deepEqual(
-    normalizePathScope([
-      { path: "/srv/app/src/a.ts", targetKind: "file" },
-      { path: "/srv/app/src/lib/b.ts", targetKind: "file" },
-    ]),
-    {
+  const win = process.platform === "win32";
+
+  const posix = normalizePathScope([
+    { path: "/srv/app/src/a.ts", targetKind: "file" },
+    { path: "/srv/app/src/lib/b.ts", targetKind: "file" },
+  ]);
+  if (win) {
+    assert.equal(posix, undefined);
+  } else {
+    assert.deepEqual(posix, {
       directories: [
         { kind: "posix", volume: "posix:/", path: "/srv/app/src" },
         { kind: "posix", volume: "posix:/", path: "/srv/app/src/lib" },
       ],
-    },
-  );
-  assert.deepEqual(
-    normalizePathScope([
-      { path: "C:\\Repo\\SRC\\a.ts", targetKind: "file" },
-      { path: "c:/repo/src/lib/b.ts", targetKind: "file" },
-    ]),
-    {
+    });
+  }
+
+  const dos = normalizePathScope([
+    { path: "C:\\Repo\\SRC\\a.ts", targetKind: "file" },
+    { path: "c:/repo/src/lib/b.ts", targetKind: "file" },
+  ]);
+  if (win) {
+    assert.deepEqual(dos, {
       directories: [
         { kind: "windows-drive", volume: "drive:c", path: "c:\\repo\\src" },
         { kind: "windows-drive", volume: "drive:c", path: "c:\\repo\\src\\lib" },
       ],
-    },
-  );
-  assert.deepEqual(
-    normalizePathScope([
-      { path: "\\\\Server\\Share\\Repo\\a", targetKind: "file" },
-      { path: "//server/share/repo/b", targetKind: "file" },
-    ]),
-    {
+    });
+  } else {
+    assert.equal(dos, undefined);
+  }
+
+  const unc = normalizePathScope([
+    { path: "\\\\Server\\Share\\Repo\\a", targetKind: "file" },
+    { path: "//server/share/repo/b", targetKind: "file" },
+  ]);
+  if (win) {
+    assert.deepEqual(unc, {
       directories: [
         { kind: "unc", volume: "unc:server/share", path: "\\\\server\\share\\repo" },
       ],
-    },
-  );
+    });
+  } else {
+    assert.equal(unc, undefined);
+  }
 });
 
 test("path scopes reject ambiguous, broad, relative, and traversal paths", () => {

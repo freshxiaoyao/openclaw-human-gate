@@ -5,16 +5,25 @@ import {
 } from "../scope.js";
 import { ADAPTIVE_ELIGIBILITY_VERSION } from "./eligibility.js";
 
-export const ADAPTIVE_STATE_VERSION = 1 as const;
+export const ADAPTIVE_STATE_VERSION = 2 as const;
 const MAX_ADAPTIVE_ENTRIES = 128;
+/** Permanent replay receipts retained per fingerprint. Reaching capacity is
+ * fail-closed (a new grant is refused) rather than FIFO-evicting an older
+ * receipt and reopening a replay window. */
+const MAX_RECEIPT_IDS = 128;
 const GRANT_KEY = /^grant2:[0-9a-f]{64}$/;
 
 export interface AdaptiveObservation {
   fingerprintKey: string;
   approvalCount: number;
   lastApprovedAt: string;
-  /** Bounded replay tombstones for approval callbacks. */
-  grantOriginToolCallIds: string[];
+}
+
+/** Permanent replay receipts. Never evicted FIFO-style; capacity is fail-closed. */
+export interface AdaptiveReceipt {
+  fingerprintKey: string;
+  originToolCallIds: string[];
+  lastGrantedAt: string;
 }
 
 export interface AdaptiveLease {
@@ -34,6 +43,7 @@ export interface AdaptiveLease {
 export interface AdaptiveState {
   version: typeof ADAPTIVE_STATE_VERSION;
   observations: Record<string, AdaptiveObservation>;
+  receipts: Record<string, AdaptiveReceipt>;
   leases: Record<string, AdaptiveLease>;
 }
 
@@ -59,7 +69,7 @@ export interface AdaptiveConsumeResult {
 }
 
 function emptyState(): AdaptiveState {
-  return { version: ADAPTIVE_STATE_VERSION, observations: {}, leases: {} };
+  return { version: ADAPTIVE_STATE_VERSION, observations: {}, receipts: {}, leases: {} };
 }
 
 function finiteTime(value: unknown): value is string {
@@ -78,11 +88,7 @@ function validObservation(key: string, raw: unknown): AdaptiveObservation | unde
     item.fingerprintKey !== key ||
     typeof item.approvalCount !== "number" || !Number.isInteger(item.approvalCount) ||
     item.approvalCount < 1 || item.approvalCount > 1_000_000 ||
-    !finiteTime(item.lastApprovedAt) ||
-    !Array.isArray(item.grantOriginToolCallIds) || item.grantOriginToolCallIds.length > 16 ||
-    item.grantOriginToolCallIds.some((id) =>
-      typeof id !== "string" || id.length === 0 || id.length > 256) ||
-    new Set(item.grantOriginToolCallIds).size !== item.grantOriginToolCallIds.length
+    !finiteTime(item.lastApprovedAt)
   ) {
     return undefined;
   }
@@ -90,7 +96,27 @@ function validObservation(key: string, raw: unknown): AdaptiveObservation | unde
     fingerprintKey: key,
     approvalCount: item.approvalCount,
     lastApprovedAt: item.lastApprovedAt,
-    grantOriginToolCallIds: [...item.grantOriginToolCallIds],
+  };
+}
+
+function validReceipt(key: string, raw: unknown): AdaptiveReceipt | undefined {
+  if (!GRANT_KEY.test(key) || !raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+  const item = raw as Partial<AdaptiveReceipt>;
+  if (
+    item.fingerprintKey !== key ||
+    !Array.isArray(item.originToolCallIds) || item.originToolCallIds.length === 0 ||
+    item.originToolCallIds.length > MAX_RECEIPT_IDS ||
+    item.originToolCallIds.some((id) =>
+      typeof id !== "string" || id.length === 0 || id.length > 256) ||
+    new Set(item.originToolCallIds).size !== item.originToolCallIds.length ||
+    !finiteTime(item.lastGrantedAt)
+  ) {
+    return undefined;
+  }
+  return {
+    fingerprintKey: key,
+    originToolCallIds: [...item.originToolCallIds],
+    lastGrantedAt: item.lastGrantedAt,
   };
 }
 
@@ -110,6 +136,7 @@ function validLease(key: string, raw: unknown): AdaptiveLease | undefined {
     Date.parse(item.expiresAt) <= Date.parse(item.grantedAt) ||
     typeof item.issuedTtlMs !== "number" || !Number.isInteger(item.issuedTtlMs) ||
     item.issuedTtlMs < 60_000 || item.issuedTtlMs > 3_600_000 ||
+    Date.parse(item.expiresAt) - Date.parse(item.grantedAt) !== item.issuedTtlMs ||
     typeof item.maxUses !== "number" || !Number.isInteger(item.maxUses) ||
     item.maxUses < 1 || item.maxUses > 100 ||
     typeof item.remainingUses !== "number" || !Number.isInteger(item.remainingUses) ||
@@ -139,21 +166,30 @@ export function normalizeAdaptiveState(value: unknown): AdaptiveState {
   if (
     candidate.version !== ADAPTIVE_STATE_VERSION ||
     !candidate.observations || typeof candidate.observations !== "object" || Array.isArray(candidate.observations) ||
+    !candidate.receipts || typeof candidate.receipts !== "object" || Array.isArray(candidate.receipts) ||
     !candidate.leases || typeof candidate.leases !== "object" || Array.isArray(candidate.leases)
   ) {
     return emptyState();
   }
   const observations: Record<string, AdaptiveObservation> = {};
+  const receipts: Record<string, AdaptiveReceipt> = {};
   const leases: Record<string, AdaptiveLease> = {};
   for (const [key, raw] of Object.entries(candidate.observations)) {
     const item = validObservation(key, raw);
     if (item) observations[key] = item;
   }
+  for (const [key, raw] of Object.entries(candidate.receipts)) {
+    const item = validReceipt(key, raw);
+    if (item) receipts[key] = item;
+  }
   for (const [key, raw] of Object.entries(candidate.leases)) {
     const item = validLease(key, raw);
     if (item) leases[key] = item;
   }
-  return { version: ADAPTIVE_STATE_VERSION, observations, leases };
+  // Receipts are replay tombstones: never prune them FIFO-style. An oversized
+  // receipt map is a corruption/DoS signal and is rejected wholesale instead.
+  if (Object.keys(receipts).length > MAX_ADAPTIVE_ENTRIES) return emptyState();
+  return boundEntries({ version: ADAPTIVE_STATE_VERSION, observations, receipts, leases });
 }
 
 function boundEntries(state: AdaptiveState): AdaptiveState {
@@ -211,7 +247,6 @@ export class AdaptiveLeaseStore {
         fingerprintKey: fingerprint.grantKey!,
         approvalCount: Math.min(1_000_000, (prior?.approvalCount ?? 0) + 1),
         lastApprovedAt: new Date(now).toISOString(),
-        grantOriginToolCallIds: [...(prior?.grantOriginToolCallIds ?? [])],
       };
       return boundEntries(next);
     });
@@ -236,23 +271,32 @@ export class AdaptiveLeaseStore {
     await this.update(sessionKey, (current) => {
       const next = normalizeAdaptiveState(current);
       const key = fingerprint.grantKey!;
-      const observation = next.observations[key];
+      const receipt = next.receipts[key];
+      const originIds = receipt?.originToolCallIds ?? [];
       // Callback replay must never refill or extend a lease, including after
       // the lease was exhausted or expired.
-      if (observation?.grantOriginToolCallIds.includes(originToolCallId)) return next;
-      const origins = [...(observation?.grantOriginToolCallIds ?? []), originToolCallId].slice(-16);
+      if (originIds.includes(originToolCallId)) return next;
+      // Receipt capacity is fail-closed, never FIFO-evicted: refuse a new
+      // grant rather than dropping an older receipt and reopening replay.
+      if (originIds.length >= MAX_RECEIPT_IDS) return next;
+      if (!receipt && Object.keys(next.receipts).length >= MAX_ADAPTIVE_ENTRIES) return next;
+      const grantedAt = new Date(now).toISOString();
+      next.receipts[key] = {
+        fingerprintKey: key,
+        originToolCallIds: [...originIds, originToolCallId],
+        lastGrantedAt: grantedAt,
+      };
+      const observation = next.observations[key];
       const existing = next.leases[key];
       if (existing && matches(existing, fingerprint, this.config) &&
         Date.parse(existing.expiresAt) > now && existing.remainingUses > 0) {
         next.observations[key] = {
           fingerprintKey: key,
           approvalCount: Math.min(1_000_000, (observation?.approvalCount ?? 0) + 1),
-          lastApprovedAt: new Date(now).toISOString(),
-          grantOriginToolCallIds: origins,
+          lastApprovedAt: grantedAt,
         };
         return boundEntries(next);
       }
-      const grantedAt = new Date(now).toISOString();
       next.leases[key] = {
         fingerprintKey: key,
         fingerprintVersion: fingerprint.fingerprintVersion,
@@ -270,7 +314,6 @@ export class AdaptiveLeaseStore {
         fingerprintKey: key,
         approvalCount: Math.min(1_000_000, (observation?.approvalCount ?? 0) + 1),
         lastApprovedAt: grantedAt,
-        grantOriginToolCallIds: origins,
       };
       granted = true;
       return boundEntries(next);
@@ -323,12 +366,14 @@ export class AdaptiveLeaseStore {
     return result;
   }
 
-  async revoke(sessionKey: string, fingerprint: AuthorizationFingerprint): Promise<void> {
+  async deny(sessionKey: string, fingerprint: AuthorizationFingerprint): Promise<void> {
     if (!isAuthorizationFingerprint(fingerprint) || !fingerprint.grantKey) return;
     await this.update(sessionKey, (current) => {
       const next = normalizeAdaptiveState(current);
       delete next.leases[fingerprint.grantKey!];
       delete next.observations[fingerprint.grantKey!];
+      // Keep the receipt (replay tombstones) permanently so a replayed
+      // allow-always callback cannot re-mint a lease after denial.
       return next;
     });
   }

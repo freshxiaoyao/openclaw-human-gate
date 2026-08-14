@@ -13,8 +13,11 @@ import {
 } from "../dist/adaptive/state.js";
 import { resolveConfig } from "../dist/config.js";
 
+const IS_WIN = process.platform === "win32";
+const ABS_PATH = IS_WIN ? "C:\\repo\\src\\a.ts" : "/repo/src/a.ts";
+
 /** A narrow, path-bound fingerprint with a real grantKey (absolute path). */
-function fp(path = "C:\\repo\\src\\a.ts") {
+function fp(path = ABS_PATH) {
   const fingerprint = createAuthorizationFingerprint({
     toolName: "write_file",
     toolKind: "write",
@@ -41,7 +44,7 @@ function report(overrides = {}) {
     analyzerIds: ["builtin.file-mutation-semantics"],
     effects: ["local-write"],
     categories: ["filesystem"],
-    verifiedTargets: [{ path: "C:\\repo\\src\\a.ts", targetKind: "file" }],
+    verifiedTargets: [{ path: ABS_PATH, targetKind: "file" }],
     findings: [],
     ...overrides,
   };
@@ -72,19 +75,25 @@ function input(overrides = {}) {
 
 // ── isStrictAbsoluteTarget ────────────────────────────────────────────────
 
-test("isStrictAbsoluteTarget accepts POSIX, Windows drive, and UNC, rejects rooted-relative", () => {
-  assert.equal(isStrictAbsoluteTarget("/tmp/a.ts"), true);
-  assert.equal(isStrictAbsoluteTarget("C:\\repo\\a.ts"), true);
-  assert.equal(isStrictAbsoluteTarget("C:/repo/a.ts"), true);
-  assert.equal(isStrictAbsoluteTarget("\\\\server\\share\\a.ts"), true);
-  assert.equal(isStrictAbsoluteTarget("//server/share/a.ts"), true);
+test("isStrictAbsoluteTarget binds path kinds to the host platform", () => {
+  const win = process.platform === "win32";
 
+  // Cross-platform negatives.
   assert.equal(isStrictAbsoluteTarget("src/a.ts"), false);
   assert.equal(isStrictAbsoluteTarget("C:foo"), false); // drive-relative
   assert.equal(isStrictAbsoluteTarget("\\foo"), false); // root-relative
   assert.equal(isStrictAbsoluteTarget(""), false);
   assert.equal(isStrictAbsoluteTarget("  "), false);
   assert.equal(isStrictAbsoluteTarget("a\nb"), false);
+
+  // Windows drive + UNC are absolute only on Windows.
+  assert.equal(isStrictAbsoluteTarget("C:\\repo\\a.ts"), win);
+  assert.equal(isStrictAbsoluteTarget("C:/repo/a.ts"), win);
+  assert.equal(isStrictAbsoluteTarget("\\\\server\\share\\a.ts"), win);
+  assert.equal(isStrictAbsoluteTarget("//server/share/a.ts"), win);
+
+  // POSIX root is absolute only on non-Windows.
+  assert.equal(isStrictAbsoluteTarget("/tmp/a.ts"), !win);
 });
 
 // ── evaluateAdaptiveEligibility ───────────────────────────────────────────
@@ -131,6 +140,22 @@ test("adaptive eligibility rejects delete/move patch effects", () => {
   assert.ok(e.reasonCodes.includes("unsupported-effects"));
 });
 
+test("semanticEligible separates lease-issuance conditions from semantic ownership", () => {
+  // Missing toolCallId: semantically a safe-file write, but no lease mintable.
+  const missingId = evaluateAdaptiveEligibility(input({ toolCallId: undefined }));
+  assert.equal(missingId.eligible, false);
+  assert.equal(missingId.semanticEligible, true);
+  assert.ok(missingId.reasonCodes.includes("missing-tool-call-id"));
+
+  // A non-safe-file shape is neither eligible nor semantically eligible.
+  const relative = evaluateAdaptiveEligibility(input({
+    decision: decision({
+      semanticReport: report({ verifiedTargets: [{ path: "src/a.ts", targetKind: "file" }] }),
+    }),
+  }));
+  assert.equal(relative.semanticEligible, false);
+});
+
 // ── AdaptiveLeaseStore ────────────────────────────────────────────────────
 
 function createBackend(defaultValue) {
@@ -146,7 +171,7 @@ function createBackend(defaultValue) {
   };
 }
 
-const EMPTY = { version: ADAPTIVE_STATE_VERSION, observations: {}, leases: {} };
+const EMPTY = { version: ADAPTIVE_STATE_VERSION, observations: {}, receipts: {}, leases: {} };
 const CFG = { ttlMs: 900_000, maxUses: 20 };
 
 test("grant creates a lease and consume deducts exactly one use", async () => {
@@ -222,17 +247,46 @@ test("consume returns missing for another path and mismatch for config drift", a
   assert.equal(drifted.snapshot("s").leases[key.grantKey], undefined);
 });
 
-test("revoke removes both the lease and observation", async () => {
+test("deny removes the lease and evidence but keeps the replay receipt", async () => {
   const backend = createBackend(EMPTY);
   const store = new AdaptiveLeaseStore(backend.read, backend.update, CFG);
   const key = fp();
-  await store.observeApproval("s", key, "allow-once", 1000);
   await store.grant("s", key, 1000, "origin-1");
-  await store.revoke("s", key);
+  await store.deny("s", key);
 
   const snap = store.snapshot("s");
   assert.equal(snap.leases[key.grantKey], undefined);
   assert.equal(snap.observations[key.grantKey], undefined);
+  assert.ok(snap.receipts[key.grantKey], "deny keeps the receipt");
+  assert.ok(snap.receipts[key.grantKey].originToolCallIds.includes("origin-1"));
+});
+
+test("a replayed allow-always callback cannot re-mint after deny", async () => {
+  const backend = createBackend(EMPTY);
+  const store = new AdaptiveLeaseStore(backend.read, backend.update, CFG);
+  const key = fp();
+
+  assert.equal(await store.grant("s", key, 1000, "origin-1"), true);
+  await store.deny("s", key);
+
+  assert.equal(await store.grant("s", key, 2000, "origin-1"), false);
+  assert.equal(store.snapshot("s").leases[key.grantKey], undefined);
+});
+
+test("receipt capacity is fail-closed, never FIFO-evicted", async () => {
+  const backend = createBackend(EMPTY);
+  const store = new AdaptiveLeaseStore(backend.read, backend.update, CFG);
+  const key = fp();
+
+  for (let i = 0; i < 128; i++) {
+    await store.grant("s", key, 1000, `origin-${i}`);
+  }
+
+  // The 129th distinct callback is refused, not FIFO-evicting origin-0.
+  assert.equal(await store.grant("s", key, 1000, "origin-128"), false);
+
+  // origin-0's receipt still exists, so its replay remains rejected.
+  assert.equal(await store.grant("s", key, 1000, "origin-0"), false);
 });
 
 test("observeApproval only counts allow-once and is capped", async () => {
@@ -253,6 +307,7 @@ test("normalizeAdaptiveState rejects legacy, malformed, and oversized entries", 
   assert.deepEqual(normalizeAdaptiveState({ version: ADAPTIVE_STATE_VERSION }), {
     version: ADAPTIVE_STATE_VERSION,
     observations: {},
+    receipts: {},
     leases: {},
   });
 
@@ -261,6 +316,7 @@ test("normalizeAdaptiveState rejects legacy, malformed, and oversized entries", 
   const malformed = normalizeAdaptiveState({
     version: ADAPTIVE_STATE_VERSION,
     observations: {},
+    receipts: {},
     leases: {
       [key]: {
         fingerprintKey: key,
@@ -280,13 +336,58 @@ test("normalizeAdaptiveState rejects legacy, malformed, and oversized entries", 
   assert.deepEqual(malformed.leases, {});
 });
 
-test("adaptive state contains only opaque digests and counters, never raw paths or params", () => {
+test("normalizeAdaptiveState rejects a forged expiry inconsistent with issuedTtlMs", () => {
+  const key = fp().grantKey;
+  const forged = normalizeAdaptiveState({
+    version: ADAPTIVE_STATE_VERSION,
+    observations: {},
+    receipts: {},
+    leases: {
+      [key]: {
+        fingerprintKey: key,
+        fingerprintVersion: 2,
+        rulesetVersion: "rules-v1",
+        eligibilityVersion: "safe-file-v1",
+        origin: "explicit-allow-always",
+        originToolCallId: "o",
+        grantedAt: "2026-01-01T00:00:00.000Z",
+        expiresAt: "2126-01-01T00:00:00.000Z", // 100 years, but issuedTtlMs says 15min
+        issuedTtlMs: 900_000,
+        maxUses: 20,
+        remainingUses: 20,
+      },
+    },
+  });
+  assert.deepEqual(forged.leases, {});
+});
+
+test("normalizeAdaptiveState prunes oversized state to the hard cap on parse", () => {
+  const observations = {};
+  for (let i = 0; i < 130; i++) {
+    const key = `grant2:${i.toString(16).padStart(64, "0")}`;
+    observations[key] = {
+      fingerprintKey: key,
+      approvalCount: 1,
+      lastApprovedAt: new Date(1000 + i).toISOString(),
+      grantOriginToolCallIds: [],
+    };
+  }
+  const normalized = normalizeAdaptiveState({
+    version: ADAPTIVE_STATE_VERSION,
+    observations,
+    receipts: {},
+    leases: {},
+  });
+  assert.equal(Object.keys(normalized.observations).length, 128);
+});
+
+test("adaptive state contains only opaque digests and counters, never raw paths or params", async () => {
   const backend = createBackend(EMPTY);
   const store = new AdaptiveLeaseStore(backend.read, backend.update, CFG);
-  const key = fp("C:\\secret\\file.ts");
-  store.grant("s", key, 1000, "origin-1");
+  const secretPath = IS_WIN ? "C:\\secret\\file.ts" : "/secret/file.ts";
+  const key = fp(secretPath);
+  await store.grant("s", key, 1000, "origin-1");
   const json = JSON.stringify(store.snapshot("s"));
-  assert.equal(json.includes("C:\\secret"), false);
   assert.equal(json.includes("secret"), false);
 });
 
