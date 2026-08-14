@@ -235,6 +235,24 @@ test("one-level any supports missing or exact own values for session observation
   assert.equal(evaluatePolicy("process", undefined, exactOnly, inherited).mode, APPROVAL);
 });
 
+test("matches regex operator matches string parameters only", () => {
+  const cfg = config({
+    rules: [{
+      id: "readonly-git",
+      toolName: "exec",
+      paramMatcher: {
+        all: [{ key: "command", matches: "^git (status|diff|log)\\b" }],
+      },
+      mode: "auto",
+    }],
+  });
+
+  assert.equal(evaluatePolicy("exec", undefined, cfg, { command: "git status" }).mode, "auto");
+  assert.equal(evaluatePolicy("exec", undefined, cfg, { command: "git diff --stat" }).mode, "auto");
+  assert.equal(evaluatePolicy("exec", undefined, cfg, { command: "git commit -m x" }).mode, APPROVAL);
+  assert.equal(evaluatePolicy("exec", undefined, cfg, { command: 123 }).mode, APPROVAL);
+});
+
 test("invalid, accessor, inherited, and prototype-injected matchers never match", () => {
   const invalidMatchers = [
     {},

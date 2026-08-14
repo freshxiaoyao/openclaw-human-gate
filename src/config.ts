@@ -130,6 +130,9 @@ function cloneParamCondition(condition: ParamCondition): ParamCondition {
   if (Object.prototype.hasOwnProperty.call(condition, "in")) {
     return { key, in: [...(ownDataValue(condition, "in") as Array<string | number | boolean | null>)] };
   }
+  if (Object.prototype.hasOwnProperty.call(condition, "matches")) {
+    return { key, matches: ownDataValue(condition, "matches") as string };
+  }
   return { key, missing: true };
 }
 

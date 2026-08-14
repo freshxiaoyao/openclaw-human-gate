@@ -30,6 +30,7 @@ export type RiskCategory =
   | "dev-build"
   | "dev-test"
   | "dev-format"
+  | "read-only"
   | "unknown";
 
 export interface RiskFinding {

@@ -8,7 +8,7 @@ export interface ToolCallContext {
     derivedPaths: readonly string[];
 }
 export type ToolEffect = "read-only" | "local-write" | "network-write" | "code-execution" | "privilege-change" | "destructive" | "unknown";
-export type RiskCategory = "filesystem" | "network" | "execution" | "credentials" | "privilege" | "source-control" | "deployment" | "obfuscation" | "dev-build" | "dev-test" | "dev-format" | "unknown";
+export type RiskCategory = "filesystem" | "network" | "execution" | "credentials" | "privilege" | "source-control" | "deployment" | "obfuscation" | "dev-build" | "dev-test" | "dev-format" | "read-only" | "unknown";
 export interface RiskFinding {
     id: string;
     category: RiskCategory;

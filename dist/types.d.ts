@@ -24,6 +24,9 @@ export type ParamCondition = {
 } | {
     key: string;
     missing: true;
+} | {
+    key: string;
+    matches: string;
 };
 /** A deliberately one-level boolean expression. Nested matcher trees are not
  * supported, keeping authorization rules inspectable and bounded. */

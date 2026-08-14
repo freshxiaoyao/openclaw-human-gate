@@ -29,7 +29,8 @@ export type ParamScalar = string | number | boolean | null;
 export type ParamCondition =
   | { key: string; equals: ParamScalar }
   | { key: string; in: ParamScalar[] }
-  | { key: string; missing: true };
+  | { key: string; missing: true }
+  | { key: string; matches: string };
 
 /** A deliberately one-level boolean expression. Nested matcher trees are not
  * supported, keeping authorization rules inspectable and bounded. */

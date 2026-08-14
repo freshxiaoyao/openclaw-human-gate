@@ -102,7 +102,7 @@ function isValidParamCondition(value) {
     const key = ownDataValue(value, "key");
     if (typeof key !== "string" || !isSafeDirectParamKey(key))
         return false;
-    const operators = ["equals", "in", "missing"].filter((operator) => Object.prototype.hasOwnProperty.call(value, operator));
+    const operators = ["equals", "in", "missing", "matches"].filter((operator) => Object.prototype.hasOwnProperty.call(value, operator));
     if (operators.length !== 1)
         return false;
     const operator = operators[0];
@@ -113,6 +113,10 @@ function isValidParamCondition(value) {
         return isParamScalar(operand);
     if (operator === "in")
         return isScalarArray(operand);
+    if (operator === "matches") {
+        return typeof operand === "string" && operand.length >= 1 && operand.length <= 256 &&
+            compilePattern(operand) !== undefined;
+    }
     return operand === true;
 }
 function isConditionArray(value) {
@@ -152,6 +156,12 @@ function conditionMatches(condition, toolParams) {
         return false;
     if (Object.prototype.hasOwnProperty.call(condition, "equals")) {
         return descriptor.value === ownDataValue(condition, "equals");
+    }
+    if (Object.prototype.hasOwnProperty.call(condition, "matches")) {
+        if (typeof descriptor.value !== "string")
+            return false;
+        const re = compilePattern(ownDataValue(condition, "matches"));
+        return re ? re.test(descriptor.value) : false;
     }
     const candidates = ownDataValue(condition, "in");
     return Array.isArray(candidates) &&

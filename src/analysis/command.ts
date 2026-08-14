@@ -747,6 +747,79 @@ function completeIntent(scans: readonly ShellScanResult[]): DevIntent | undefine
   return intents.size === 1 ? [...intents][0] : undefined;
 }
 
+const READONLY_GIT_SUBCOMMANDS = new Set([
+  "status", "diff", "log", "show", "grep", "blame", "ls-files", "rev-parse",
+]);
+
+/** Conservative read-only executables. Commands with write flags are excluded
+ * (`sort -o`, `tee`, `sed -i`, `find -delete`/`-exec`) so an auto rule can
+ * never silently authorize a filesystem write. */
+const READONLY_EXECUTABLES = new Set([
+  // POSIX
+  "cat", "head", "tail", "less", "more", "wc", "uniq", "comm", "grep", "egrep",
+  "rg", "ls", "locate", "echo", "printf", "pwd", "whoami", "hostname", "date",
+  "uname", "id", "df", "du", "true", "false", "test", "which", "where",
+  "whereis", "type", "file", "stat", "cmp", "diff", "cut", "tr", "dirname",
+  "basename", "realpath", "readlink",
+  // PowerShell read-only cmdlets
+  "get-childitem", "get-content", "get-location", "get-date", "get-process",
+  "get-service", "get-item", "get-itemproperty", "select-string", "test-path",
+  "measure-object", "where-object", "resolve-path", "split-path", "join-path",
+  "format-list", "format-table", "out-string", "compare-object", "select-object",
+  "group-object", "sort-object", "convertto-json", "convertfrom-json",
+]);
+
+function isReadOnlyOpenclaw(args: readonly string[]): boolean {
+  const sub = args[0]?.toLowerCase();
+  if (sub === "status" || sub === "doctor") return true;
+  if (sub === "config") return args[1] === "get" || args[1] === "schema.lookup";
+  if (sub === "plugins") {
+    const cmd = args[1];
+    return cmd === "list" || cmd === "info" || cmd === "inspect" ||
+      cmd === "doctor" || cmd === "search";
+  }
+  if (sub === "session") return args[1] === "list" || args[1] === "status";
+  return false;
+}
+
+function isReadOnlyNpm(args: readonly string[]): boolean {
+  const sub = args[0]?.toLowerCase();
+  if (sub === "view" || sub === "info" || sub === "ls" || sub === "list" || sub === "outdated") {
+    return true;
+  }
+  if (sub === "config") return args[1] === "get";
+  return false;
+}
+
+function isReadOnlyInvocation(command: string, args: readonly string[]): boolean {
+  if (command === "git") {
+    return READONLY_GIT_SUBCOMMANDS.has(gitSubcommand(args)?.name ?? "");
+  }
+  if (command === "openclaw") return isReadOnlyOpenclaw(args);
+  if (command === "npm") return isReadOnlyNpm(args);
+  return READONLY_EXECUTABLES.has(command);
+}
+
+/** A read-only shell command is a single, simple, operator/redirection-free
+ * invocation of a known read-only executable (or read-only subcommand) across
+ * all three dialects. Wrappers (`sudo`/`env`/…) still carry their own risk
+ * findings independently, so a privileged read-only command stays gated. */
+function isReadOnlyCommand(scans: readonly ShellScanResult[]): boolean {
+  const rootScans = scans.slice(0, 3);
+  if (rootScans.length !== 3) return false;
+  const results = new Set<boolean>();
+  for (const scan of rootScans) {
+    if (!scan.complete || scan.invocations.length !== 1 || scan.operators.length > 0 ||
+      scan.redirections.length > 0 || scan.tokens.some((token) => token.dynamic)) {
+      return false;
+    }
+    const invocation = scan.invocations[0];
+    const { command, args } = effectiveInvocationParts(scan, invocation?.index);
+    results.add(isReadOnlyInvocation(command, args));
+  }
+  return results.size === 1 && results.has(true);
+}
+
 export class CommandAnalyzer implements ToolCallAnalyzer {
   readonly id = "builtin.command-semantics";
   readonly priority = 100;
@@ -815,10 +888,14 @@ export class CommandAnalyzer implements ToolCallAnalyzer {
       });
     }
 
-    const intentComplete = !wasTruncated &&
+    const readOnly = !wasTruncated &&
       !bundle.wrapperLimitReached &&
       !parseIncomplete &&
-      completeIntent(scans) !== undefined;
+      isReadOnlyCommand(scans);
+    const intentComplete = (!wasTruncated &&
+      !bundle.wrapperLimitReached &&
+      !parseIncomplete) &&
+      (completeIntent(scans) !== undefined || readOnly);
     if (!intentComplete && !wasTruncated && !bundle.wrapperLimitReached && !parseIncomplete) {
       findings.push({
         id: "command.intent-incomplete",
@@ -832,17 +909,20 @@ export class CommandAnalyzer implements ToolCallAnalyzer {
     }
 
     const critical = findings.some((finding) => finding.severity === "critical");
-    const windowEligible = !wasTruncated &&
+    const windowEligible = !readOnly &&
+      !wasTruncated &&
       !bundle.wrapperLimitReached &&
       !parseIncomplete &&
       intentComplete &&
       !matchedRules.some((rule) => rule.disablesWindow);
     const effects = [...new Set([
       ...matchedRules.map((rule) => rule.effect),
+      ...(readOnly ? ["read-only" as const] : []),
       ...(!intentComplete ? ["unknown" as const] : []),
     ])];
     const categories = [...new Set([
       ...matchedRules.map((rule) => rule.category),
+      ...(readOnly ? ["read-only" as const] : []),
       ...(!intentComplete ? ["unknown" as const] : []),
     ])];
 

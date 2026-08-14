@@ -108,6 +108,9 @@ function cloneParamCondition(condition) {
     if (Object.prototype.hasOwnProperty.call(condition, "in")) {
         return { key, in: [...ownDataValue(condition, "in")] };
     }
+    if (Object.prototype.hasOwnProperty.call(condition, "matches")) {
+        return { key, matches: ownDataValue(condition, "matches") };
+    }
     return { key, missing: true };
 }
 function cloneRuleParamMatcher(matcher) {

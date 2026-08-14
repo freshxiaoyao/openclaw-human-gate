@@ -36,7 +36,13 @@
             "maxItems": 32,
             "items": { "$ref": "#/$defs/paramScalar" }
           },
-          "missing": { "const": true }
+          "missing": { "const": true },
+          "matches": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256,
+            "description": "Regex matched against a string parameter value. Only string parameters match; invalid regexes never match."
+          }
         }
       }
     },

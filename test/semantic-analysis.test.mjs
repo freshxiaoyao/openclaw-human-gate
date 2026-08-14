@@ -200,13 +200,27 @@ test("formatter check-only forms remain fail-closed", () => {
 });
 
 test("unclassified or compound shell intent remains fail-closed", () => {
-  for (const command of ["echo hello", "git log --format=push", "git commit && curl x"]) {
+  for (const command of ["node -e '1'", "python -c 'print(1)'", "git commit && curl x"]) {
     const report = analyze(command);
     assert.equal(report.complete, false, command);
     assert.equal(report.windowEligible, false, command);
     assert.ok(report.effects.includes("unknown"), command);
     assert.ok(report.categories.includes("unknown"), command);
   }
+});
+
+test("read-only shell commands are complete and carry no upgrade", () => {
+  const status = analyze("git status");
+  assert.deepEqual(status.effects, ["read-only"]);
+  assert.deepEqual(status.categories, ["read-only"]);
+  assert.equal(status.complete, true);
+  assert.equal(status.minimumMode, undefined);
+  assert.equal(status.windowEligible, false);
+
+  // A privileged read-only command still carries its privilege finding.
+  const sudo = analyze("sudo git status");
+  assert.equal(sudo.minimumMode, "require-approval");
+  assert.ok(sudo.findings.some((f) => f.id === "command.privilege-elevation"));
 });
 
 test("wrapper depth exhaustion fails closed without throwing", () => {
