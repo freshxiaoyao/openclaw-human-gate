@@ -42,6 +42,14 @@ export const DEFAULT_CONFIG = {
         maxUses: 20,
         suggestAfterApprovals: 2,
     },
+    denyCooldownMs: 120_000,
+    selfProtection: {
+        enabled: true,
+    },
+    decisionLog: {
+        enabled: true,
+        maxEntries: 512,
+    },
     rules: [],
     autoPassSessionKeys: [":cron:", ":heartbeat"],
 };

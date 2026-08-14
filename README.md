@@ -106,6 +106,36 @@ have side effects; reads pass through:
 Disable classification with `useClassifiers: false` to rely solely on explicit
 rules + `defaultMode`.
 
+## Deny cooldown
+
+After you explicitly **deny** an approval, matching calls auto-**block** for
+a short window (`denyCooldownMs`, default 120s) instead of asking the same
+question again. The cooldown is keyed by the same semantic scope as the
+approval window (directory-scoped for file writes), so denying one write in a
+directory cools down sibling writes but not other directories. It converts
+ask → block only: it never touches auto or block decisions, never survives
+the window, and a clock rollback cannot extend it. `denyCooldownMs: 0`
+disables the behavior entirely.
+
+## Self-protection (authority surface)
+
+File-write / shell-command calls whose parameters reference the authority
+surface — `openclaw.json` or any path under a `.openclaw` directory — are
+**blocked** regardless of which rule, grant, or window would otherwise apply
+(remit-style sensitive-target classification). Escalation-only: it can only
+tighten a decision, never loosen one, and it runs before grants/windows are
+consulted, so no lease can reach it. Pure reads of the config are *not*
+escalated — inspecting the config (`read`, `doctor`, `status`) stays usable.
+
+## Decision log
+
+Every decision (block, auto-pass, ask, resolution) is recorded in a bounded
+in-memory ring buffer (`decisionLog.maxEntries`, default 512) with a session
+**digest** — never the raw session key or parameter values. Set
+`decisionLog.filePath` to an absolute path (or `~/...`) for an append-only
+JSONL audit trail. Recording is best-effort: a write failure never changes an
+enforcement outcome.
+
 ## Auto-pass system contexts (cron / heartbeat)
 
 Scheduled runs (cron jobs, heartbeat) have no human at the keyboard, so an
@@ -409,6 +439,15 @@ destructive toolKinds → name-token classifier → `defaultMode`. See
             pathFallback: "none",
             ttlMs: 300000,
             bypassCritical: true
+          },
+          denyCooldownMs: 120000,
+          selfProtection: {
+            enabled: true
+          },
+          decisionLog: {
+            enabled: true,
+            maxEntries: 512
+            // filePath: "~/.openclaw/human-gate/decisions.jsonl"  // optional audit trail
           },
           rules: [
             {

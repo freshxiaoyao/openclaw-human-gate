@@ -100,6 +100,18 @@ export interface HumanGateConfig {
    * restricted to complete, non-destructive local file writes whose analyzer-
    * verified targets are absolute paths. */
   adaptiveAutoPass: AdaptiveAutoPassConfig;
+  /** After an explicit deny, matching calls auto-block for this long instead
+   * of asking again (0 disables). ask→block only — never touches auto or
+   * block decisions, and never survives the cooldown window. */
+  denyCooldownMs: number;
+  /** Structural self-protection: file-write / shell-command calls whose
+   * parameters reference the authority surface (openclaw.json, any path
+   * under a .openclaw directory) escalate to a block. Escalation-only and
+   * runs before grants/windows are consulted, so no lease can reach it. */
+  selfProtection: SelfProtectionConfig;
+  /** Best-effort decision audit trail (memory ring buffer + optional JSONL).
+   * Recording failures never change an enforcement outcome. */
+  decisionLog: DecisionLogConfig;
   /** Ordered policy rules. First match wins. */
   rules: GateRule[];
   /** Session-key `:`-delimited segments that auto-pass the approval prompt
@@ -152,6 +164,24 @@ export interface ApprovalWindowConfig {
   /** When true (default), severity "critical" calls always prompt even if a
    *  window is open (e.g. production deploys never get auto-passed). */
   bypassCritical: boolean;
+}
+
+/** Self-protection escalation (remit-style sensitive target classification). */
+export interface SelfProtectionConfig {
+  /** Master switch. On by default; escalation is structural and can only
+   * tighten a decision, never loosen one. */
+  enabled: boolean;
+}
+
+/** Best-effort decision audit trail. */
+export interface DecisionLogConfig {
+  enabled: boolean;
+  /** In-memory ring buffer size. Oldest entries are evicted first. */
+  maxEntries: number;
+  /** Optional append-only JSONL path (absolute or `~/...`). Omitted = memory
+   * only. Write failures are swallowed — the log is never an enforcement
+   * dependency. */
+  filePath?: string;
 }
 
 /** Controls bounded adaptive auto-pass evaluation for repeated file writes. */
@@ -208,6 +238,14 @@ export const DEFAULT_CONFIG: HumanGateConfig = {
     ttlMs: 900_000,
     maxUses: 20,
     suggestAfterApprovals: 2,
+  },
+  denyCooldownMs: 120_000,
+  selfProtection: {
+    enabled: true,
+  },
+  decisionLog: {
+    enabled: true,
+    maxEntries: 512,
   },
   rules: [],
   autoPassSessionKeys: [":cron:", ":heartbeat"],

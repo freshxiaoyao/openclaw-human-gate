@@ -41,6 +41,7 @@ import {
   parseAskInput,
   formatAskForChat,
   askDetails,
+  allowAlwaysKey,
 } from "./types.js";
 import { resolveConfig } from "./config.js";
 import { evaluatePolicy, isAutoPassContext } from "./policy.js";
@@ -49,6 +50,13 @@ import {
   AllowAlwaysStore,
   normalizeAllowAlwaysState,
 } from "./state.js";
+import {
+  DENY_COOLDOWN_STATE_VERSION,
+  DenyCooldownStore,
+  normalizeDenyCooldownState,
+} from "./deny-cooldown.js";
+import { DecisionLog, digestSessionKey } from "./decision-log.js";
+import { classifySensitiveEscalation } from "./self-protection.js";
 import {
   WINDOW_STATE_VERSION,
   ApprovalWindowStore,
@@ -78,6 +86,7 @@ const ASK_TOOL_NAME = "human_gate_ask";
 const ALLOW_ALWAYS_NAMESPACE = "allow-always-v2";
 const WINDOW_NAMESPACE = "approval-window-v2";
 const ADAPTIVE_NAMESPACE = "adaptive-auto-pass-v1";
+const DENY_COOLDOWN_NAMESPACE = "deny-cooldown-v1";
 const HOOK_PRIORITY = 60;
 // OpenClaw runs typed hooks in descending numeric priority. There is no public
 // finalizer hook, so this ordinary-hook compatibility seal deliberately sorts
@@ -369,6 +378,10 @@ const pluginEntry: OpenClawPluginDefinition = definePluginEntry({
       namespace: ADAPTIVE_NAMESPACE,
       description: "Bounded adaptive safe-file leases and non-authorizing approval evidence",
     });
+    api.session.state.registerSessionExtension({
+      namespace: DENY_COOLDOWN_NAMESPACE,
+      description: "Per-session deny cooldowns for Human Gate",
+    });
 
     const allowAlways = new AllowAlwaysStore(
       (sessionKey) =>
@@ -413,6 +426,21 @@ const pluginEntry: OpenClawPluginDefinition = definePluginEntry({
         ),
       config.adaptiveAutoPass,
     );
+    const denyCooldown = new DenyCooldownStore(
+      (sessionKey) =>
+        normalizeDenyCooldownState(extensionValue(api, sessionKey, DENY_COOLDOWN_NAMESPACE)),
+      (sessionKey, update) =>
+        patchExtension(
+          api,
+          sessionKey,
+          DENY_COOLDOWN_NAMESPACE,
+          { version: DENY_COOLDOWN_STATE_VERSION, denials: {} },
+          normalizeDenyCooldownState,
+          update,
+        ),
+      config.denyCooldownMs,
+    );
+    const decisionLog = new DecisionLog(config.decisionLog);
     // The same event object is passed to every ordinary hook. Capture the
     // gate-time snapshot by object identity so an intervening handler cannot
     // defeat the final seal by mutating event.params in place.
@@ -441,6 +469,16 @@ const pluginEntry: OpenClawPluginDefinition = definePluginEntry({
             rule: baseDecision.rule?.id,
             blockReason,
           }));
+          decisionLog.record({
+            ts: Date.now(),
+            sessionDigest: digestSessionKey(sessionKey),
+            sessionId: ctx.sessionId,
+            toolName: event.toolName,
+            ruleId: baseDecision.rule?.id,
+            decision: "block",
+            severity: baseDecision.severity,
+            reason: blockReason,
+          });
           return { block: true, blockReason };
         }
         const paramsSnapshot = snapshotParams(event.params);
@@ -450,9 +488,48 @@ const pluginEntry: OpenClawPluginDefinition = definePluginEntry({
             tool: event.toolName,
             sessionId: ctx.sessionId,
           }));
+          decisionLog.record({
+            ts: Date.now(),
+            sessionDigest: digestSessionKey(sessionKey),
+            sessionId: ctx.sessionId,
+            toolName: event.toolName,
+            decision: "block",
+            severity: "critical",
+            reason: blockReason,
+          });
           return { block: true, blockReason };
         }
         parameterSeals.set(event, paramsSnapshot);
+        // Structural self-protection: file-write / shell-command calls that
+        // reference the authority surface (openclaw.json, paths under a
+        // .openclaw directory) are blocked before any analyzer, grant, or
+        // window runs. Escalation-only — pure reads pass through untouched.
+        if (config.selfProtection.enabled) {
+          const sensitive = classifySensitiveEscalation(
+            event.toolName,
+            event.toolKind,
+            paramsSnapshot,
+          );
+          if (sensitive.escalate) {
+            const blockReason = `Human Gate self-protection: call touches the authority surface (${sensitive.hits.map((hit) => hit.marker).join(", ")})`;
+            log.warn(logPayload("human-gate: self-protection block", {
+              tool: event.toolName,
+              markers: sensitive.hits.map((hit) => hit.marker),
+              sessionId: ctx.sessionId,
+            }));
+            decisionLog.record({
+              ts: Date.now(),
+              sessionDigest: digestSessionKey(sessionKey),
+              sessionId: ctx.sessionId,
+              toolName: event.toolName,
+              ruleId: "builtin:self-protection",
+              decision: "block",
+              severity: "critical",
+              reason: blockReason,
+            });
+            return { block: true, blockReason };
+          }
+        }
         const analysisContext: ToolCallContext = {
           toolName: event.toolName,
           toolKind: event.toolKind,
@@ -505,6 +582,16 @@ const pluginEntry: OpenClawPluginDefinition = definePluginEntry({
         }));
 
         if (decision.mode === "auto") {
+          decisionLog.record({
+            ts: Date.now(),
+            sessionDigest: digestSessionKey(sessionKey),
+            sessionId: ctx.sessionId,
+            toolName: event.toolName,
+            ruleId: decision.rule?.id,
+            decision: "auto",
+            severity: decision.severity,
+            scopeDigest: fingerprint?.windowKey?.slice(0, 19),
+          });
           // Every pass is bound to the exact JSON-safe snapshot that was
           // classified. The final sealer below restores this snapshot after
           // ordinary lower-priority plugin parameter rewrites.
@@ -520,6 +607,17 @@ const pluginEntry: OpenClawPluginDefinition = definePluginEntry({
             rule: decision.rule?.id,
             blockReason,
           }));
+          decisionLog.record({
+            ts: Date.now(),
+            sessionDigest: digestSessionKey(sessionKey),
+            sessionId: ctx.sessionId,
+            toolName: event.toolName,
+            ruleId: decision.rule?.id,
+            decision: "block",
+            severity: decision.severity,
+            scopeDigest: fingerprint?.windowKey?.slice(0, 19),
+            reason: blockReason,
+          });
           return {
             block: true,
             blockReason,
@@ -546,16 +644,64 @@ const pluginEntry: OpenClawPluginDefinition = definePluginEntry({
               findings: decision.semanticReport.findings.map((finding) => finding.id),
               sessionKey,
             }));
+            decisionLog.record({
+              ts: Date.now(),
+              sessionDigest: digestSessionKey(sessionKey),
+              sessionId: ctx.sessionId,
+              toolName: event.toolName,
+              ruleId: decision.rule?.id,
+              decision: "block",
+              severity: decision.severity,
+              scopeDigest: fingerprint?.windowKey?.slice(0, 19),
+              reason: blockReason,
+            });
             return { block: true, blockReason };
           }
           log.debug?.(logPayload("human-gate: auto-pass system context", {
             tool: event.toolName,
             sessionKey,
           }));
+          decisionLog.record({
+            ts: Date.now(),
+            sessionDigest: digestSessionKey(sessionKey),
+            sessionId: ctx.sessionId,
+            toolName: event.toolName,
+            ruleId: decision.rule?.id,
+            decision: "auto",
+            severity: decision.severity,
+            scopeDigest: fingerprint?.windowKey?.slice(0, 19),
+            reason: "unattended auto-pass",
+          });
           return { params: paramsSnapshot };
         }
         const win = config.approvalWindow;
         const now = Date.now();
+        // Deny cooldown: after an explicit deny, matching calls auto-block for
+        // denyCooldownMs instead of asking the same question again. Keyed by
+        // the semantic scope when available, else ruleId::toolName. This runs
+        // before grants/windows so a recent explicit deny wins over an older
+        // standing authorization; it only ever turns ask into block.
+        const cooldownKey = fingerprint?.windowKey ??
+          (decision.rule ? allowAlwaysKey(decision.rule.id, event.toolName) : event.toolName);
+        if (sessionKey && denyCooldown.isCoolingDown(sessionKey, cooldownKey, now)) {
+          const blockReason = `Human Gate deny cooldown: this call was recently denied and repeats are blocked for ${Math.max(1, Math.round(config.denyCooldownMs / 1000))}s`;
+          log.info(logPayload("human-gate: deny cooldown block", {
+            tool: event.toolName,
+            sessionId: ctx.sessionId,
+          }));
+          decisionLog.record({
+            ts: now,
+            sessionDigest: digestSessionKey(sessionKey),
+            sessionId: ctx.sessionId,
+            toolName: event.toolName,
+            ruleId: decision.rule?.id,
+            decision: "block",
+            severity: decision.severity,
+            scopeDigest: fingerprint?.windowKey?.slice(0, 19),
+            reason: blockReason,
+          });
+          return { block: true, blockReason };
+        }
         if (adaptiveOwns) {
           // Semantically adaptive-owned calls never fall back to legacy
           // grants/windows, even when no lease can be minted right now
@@ -571,7 +717,20 @@ const pluginEntry: OpenClawPluginDefinition = definePluginEntry({
                 remainingAfter: consumed.remainingAfter,
                 legacySuppressed: true,
               }));
-              if (consumed.outcome === "consumed") return { params: paramsSnapshot };
+              if (consumed.outcome === "consumed") {
+                decisionLog.record({
+                  ts: now,
+                  sessionDigest: digestSessionKey(sessionKey),
+                  sessionId: ctx.sessionId,
+                  toolName: event.toolName,
+                  ruleId: decision.rule?.id,
+                  decision: "auto",
+                  severity: decision.severity,
+                  scopeDigest: fingerprint?.grantKey?.slice(0, 19),
+                  reason: "adaptive lease",
+                });
+                return { params: paramsSnapshot };
+              }
             } catch {
               // Store failure is an authorization miss. Do not expose exception
               // text (which may contain host paths/state); continue to approval.
@@ -596,6 +755,17 @@ const pluginEntry: OpenClawPluginDefinition = definePluginEntry({
               tool: event.toolName,
               scope: fingerprint.resolvedScope,
             }));
+            decisionLog.record({
+              ts: now,
+              sessionDigest: digestSessionKey(sessionKey),
+              sessionId: ctx.sessionId,
+              toolName: event.toolName,
+              ruleId: decision.rule?.id,
+              decision: "auto",
+              severity: decision.severity,
+              scopeDigest: fingerprint.grantKey.slice(0, 19),
+              reason: "allow-always grant",
+            });
             return { params: paramsSnapshot };
           }
           if (
@@ -611,6 +781,17 @@ const pluginEntry: OpenClawPluginDefinition = definePluginEntry({
               resolvedScope: fingerprint.resolvedScope,
               runId: ctx.runId,
             }));
+            decisionLog.record({
+              ts: now,
+              sessionDigest: digestSessionKey(sessionKey),
+              sessionId: ctx.sessionId,
+              toolName: event.toolName,
+              ruleId: decision.rule?.id,
+              decision: "auto",
+              severity: decision.severity,
+              scopeDigest: fingerprint.windowKey.slice(0, 19),
+              reason: "approval window",
+            });
             return { params: paramsSnapshot };
           }
         }
@@ -662,6 +843,19 @@ const pluginEntry: OpenClawPluginDefinition = definePluginEntry({
           }
         }
 
+        const askedAt = Date.now();
+        decisionLog.record({
+          ts: askedAt,
+          sessionDigest: digestSessionKey(sessionKey),
+          sessionId: ctx.sessionId,
+          toolName: event.toolName,
+          ruleId: decision.rule?.id,
+          decision: "ask",
+          severity: decision.severity,
+          scopeDigest: fingerprint?.windowKey?.slice(0, 19),
+          reason: decision.reason,
+        });
+
         return {
           // Bind the approval to the exact params that were analyzed and shown.
           params: paramsSnapshot,
@@ -676,6 +870,20 @@ const pluginEntry: OpenClawPluginDefinition = definePluginEntry({
             pluginId: PLUGIN_ID,
             onResolution: async (res: ApprovalResolution) => {
               try {
+                decisionLog.record({
+                  ts: Date.now(),
+                  sessionDigest: digestSessionKey(sessionKey),
+                  sessionId: ctx.sessionId,
+                  toolName: event.toolName,
+                  ruleId: decision.rule?.id,
+                  decision: res,
+                  severity: decision.severity,
+                  scopeDigest: fingerprint?.windowKey?.slice(0, 19),
+                  latencyMs: Date.now() - askedAt,
+                });
+                if (res === "deny" && sessionKey) {
+                  await denyCooldown.recordDeny(sessionKey, cooldownKey, Date.now());
+                }
                 // Session state is never shared or remembered without a trusted
                 // session key. The approved current call still proceeds.
                 if (!sessionKey) {

@@ -234,6 +234,47 @@
         "default": [":cron:", ":heartbeat"],
         "description": "Exact colon-delimited session-key segments that auto-pass non-critical approval prompts. Critical calls follow unattendedPolicy."
       },
+      "denyCooldownMs": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 3600000,
+        "default": 120000,
+        "description": "After an explicit deny, matching calls auto-block for this many milliseconds instead of asking again (0 disables). ask→block only; never touches auto or block decisions."
+      },
+      "selfProtection": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "Structural self-protection: file-write / shell-command calls whose parameters reference the authority surface (openclaw.json, any path under a .openclaw directory) escalate to a block. Escalation-only and runs before grants/windows are consulted.",
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "default": true,
+            "description": "Master switch. On by default; escalation can only tighten a decision, never loosen one."
+          }
+        }
+      },
+      "decisionLog": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "Best-effort decision audit trail: memory ring buffer plus optional append-only JSONL. Recording failures never change an enforcement outcome.",
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "default": true
+          },
+          "maxEntries": {
+            "type": "integer",
+            "minimum": 16,
+            "maximum": 8192,
+            "default": 512,
+            "description": "In-memory ring buffer size. Oldest entries are evicted first."
+          },
+          "filePath": {
+            "type": "string",
+            "description": "Optional append-only JSONL path (absolute or ~/...). Omitted = memory only."
+          }
+        }
+      },
       "rules": {
         "type": "array",
         "description": "Ordered policy rules. First match wins.",

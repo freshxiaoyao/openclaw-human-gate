@@ -100,6 +100,27 @@ function resolveUnattendedPolicy(raw) {
             : d.critical,
     };
 }
+function resolveSelfProtection(raw) {
+    const d = DEFAULT_CONFIG.selfProtection;
+    if (!isObject(raw))
+        return { ...d };
+    return {
+        enabled: typeof raw.enabled === "boolean" ? raw.enabled : d.enabled,
+    };
+}
+function resolveDecisionLog(raw) {
+    const d = DEFAULT_CONFIG.decisionLog;
+    if (!isObject(raw))
+        return { ...d };
+    const filePath = ownDataValue(raw, "filePath");
+    return {
+        enabled: typeof raw.enabled === "boolean" ? raw.enabled : d.enabled,
+        maxEntries: clampInteger(raw.maxEntries, d.maxEntries, 16, 8192),
+        ...(typeof filePath === "string" && filePath.trim().length > 0
+            ? { filePath: filePath.trim() }
+            : {}),
+    };
+}
 function cloneParamCondition(condition) {
     const key = ownDataValue(condition, "key");
     if (Object.prototype.hasOwnProperty.call(condition, "equals")) {
@@ -158,6 +179,8 @@ export function resolveConfig(pluginConfig) {
             semanticAnalysis: { ...DEFAULT_CONFIG.semanticAnalysis },
             previews: { ...DEFAULT_CONFIG.previews },
             unattendedPolicy: { ...DEFAULT_CONFIG.unattendedPolicy },
+            selfProtection: { ...DEFAULT_CONFIG.selfProtection },
+            decisionLog: { ...DEFAULT_CONFIG.decisionLog },
             rules: [...DEFAULT_CONFIG.rules],
             autoPassSessionKeys: [...DEFAULT_CONFIG.autoPassSessionKeys],
         };
@@ -188,6 +211,9 @@ export function resolveConfig(pluginConfig) {
         unattendedPolicy: resolveUnattendedPolicy(pluginConfig.unattendedPolicy),
         approvalWindow: resolveWindowConfig(pluginConfig.approvalWindow),
         adaptiveAutoPass: resolveAdaptiveAutoPass(ownDataValue(pluginConfig, "adaptiveAutoPass")),
+        denyCooldownMs: clampInteger(pluginConfig.denyCooldownMs, DEFAULT_CONFIG.denyCooldownMs, 0, 3_600_000),
+        selfProtection: resolveSelfProtection(pluginConfig.selfProtection),
+        decisionLog: resolveDecisionLog(pluginConfig.decisionLog),
         rules: resolveRules(pluginConfig.rules),
         autoPassSessionKeys: Array.isArray(pluginConfig.autoPassSessionKeys)
             ? pluginConfig.autoPassSessionKeys.map(String)

@@ -163,7 +163,7 @@ test("plugin entry loads and registers against the mock API", async () => {
   assert.equal(calls.registerTool[0].tool.name, "human_gate_ask");
   assert.deepEqual(
     calls.extensions.map((e) => e.namespace).sort(),
-    ["adaptive-auto-pass-v1", "allow-always-v2", "approval-window-v2"],
+    ["adaptive-auto-pass-v1", "allow-always-v2", "approval-window-v2", "deny-cooldown-v1"],
   );
 });
 
@@ -1121,8 +1121,18 @@ test("enforce + deny revokes and leaves no trust behind", async () => {
   assert.ok(exhausted?.requireApproval, "exhausted lease must prompt");
   await exhausted.requireApproval.onResolution("deny");
 
-  // No trust remains.
-  assert.ok((await handler(adaptiveEvent("call-4"), ctx))?.requireApproval, "deny revokes; a fresh allow-always is required");
+  // No trust remains — and the explicit deny also arms the deny cooldown, so
+  // the immediate repeat is blocked rather than prompted (ask→block only).
+  const repeat = await handler(adaptiveEvent("call-4"), ctx);
+  assert.ok(
+    repeat?.requireApproval || repeat?.block,
+    "deny revokes; a fresh allow-always (or cooldown block) is required",
+  );
+  assert.equal(
+    repeat?.requireApproval ?? false,
+    false,
+    "a denied call must not be silently auto-passed",
+  );
 });
 
 test("enforce + cancel never creates a lease", async () => {
@@ -1134,4 +1144,102 @@ test("enforce + cancel never creates a lease", async () => {
   await fresh.requireApproval.onResolution("cancelled");
 
   assert.ok((await handler(adaptiveEvent("call-2"), ctx))?.requireApproval, "cancel never increases trust");
+});
+
+// ── P0: deny cooldown + self-protection + decision log (integration) ──
+
+function p0Config(overrides = {}) {
+  return {
+    defaultMode: "require-approval",
+    approvalWindow: { mode: "off" },
+    adaptiveAutoPass: { mode: "off" },
+    ...overrides,
+  };
+}
+
+async function loadP0Handler(pluginConfig) {
+  const entry = await loadPlugin();
+  const { api, calls } = createMockApi({ pluginConfig, backend: createSessionBackend() });
+  await entry.register(api);
+  return hookFor(calls, "before_tool_call");
+}
+
+test("self-protection blocks an exec that touches openclaw.json", async () => {
+  const handler = await loadP0Handler(p0Config());
+  const result = await handler(
+    { toolName: "exec", toolKind: "exec", params: { command: "Set-Content openclaw.json x" } },
+    adaptiveCtx(),
+  );
+  assert.ok(result?.block, "self-protection must block config-touching exec");
+  assert.match(result.blockReason, /self-protection/i);
+});
+
+test("self-protection never blocks reading the config", async () => {
+  const handler = await loadP0Handler(p0Config());
+  const result = await handler(
+    { toolName: "read", toolKind: "read", params: { path: "C:\\Users\\lenovo\\.openclaw\\openclaw.json" } },
+    adaptiveCtx(),
+  );
+  assert.equal(result?.requireApproval ?? false, false);
+  assert.equal(result?.block ?? false, false, "pure reads of the config stay usable");
+});
+
+test("selfProtection.enabled=false restores the ordinary approval path", async () => {
+  const handler = await loadP0Handler(p0Config({ selfProtection: { enabled: false } }));
+  const result = await handler(
+    { toolName: "exec", toolKind: "exec", params: { command: "Set-Content openclaw.json x" } },
+    adaptiveCtx(),
+  );
+  assert.ok(result?.requireApproval, "disabled self-protection falls back to the normal gate");
+  assert.equal(result?.block ?? false, false);
+});
+
+test("deny cooldown blocks an immediate repeat", async () => {
+  const handler = await loadP0Handler(p0Config({ denyCooldownMs: 60_000 }));
+  const ctx = adaptiveCtx();
+  const writeEvent = (path, toolCallId) => ({
+    toolName: "write_file",
+    params: { path },
+    toolCallId,
+  });
+
+  const first = await handler(writeEvent("C:\\repo\\src\\a.ts", "call-1"), ctx);
+  assert.ok(first?.requireApproval);
+  await first.requireApproval.onResolution("deny");
+
+  const repeat = await handler(writeEvent("C:\\repo\\src\\a.ts", "call-2"), ctx);
+  assert.ok(repeat?.block, "an immediate repeat after deny is blocked by the cooldown");
+  assert.match(repeat.blockReason, /deny cooldown/i);
+});
+
+test("denyCooldownMs=0 keeps prompting after a deny", async () => {
+  const handler = await loadP0Handler(p0Config({ denyCooldownMs: 0 }));
+  const ctx = adaptiveCtx();
+
+  const first = await handler(adaptiveEvent("call-1"), ctx);
+  assert.ok(first?.requireApproval);
+  await first.requireApproval.onResolution("deny");
+
+  const repeat = await handler(adaptiveEvent("call-2"), ctx);
+  assert.ok(repeat?.requireApproval, "cooldown off → prompt again after deny");
+  assert.equal(repeat?.block ?? false, false);
+});
+
+test("a deny does not cooldown a different path scope", async () => {
+  const handler = await loadP0Handler(p0Config({ denyCooldownMs: 60_000 }));
+  const ctx = adaptiveCtx();
+  const writeEvent = (path, toolCallId) => ({
+    toolName: "write_file",
+    params: { path },
+    toolCallId,
+  });
+
+  const first = await handler(writeEvent("C:\\repo\\src\\a.ts", "call-1"), ctx);
+  assert.ok(first?.requireApproval);
+  await first.requireApproval.onResolution("deny");
+
+  // Path scopes are directory-scoped by design (sibling writes share a
+  // window), so a file in a *different directory* is a different scope.
+  const other = await handler(writeEvent("C:\\repo\\lib\\other.ts", "call-2"), ctx);
+  assert.ok(other?.requireApproval, "a different directory scope is not cooled down");
 });
