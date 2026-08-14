@@ -87,6 +87,12 @@ export interface HumanGateConfig {
     /** Approval window: after the human approves one completely analyzed call,
      *  matching semantic fingerprints may auto-pass for a turn or time box. */
     approvalWindow: ApprovalWindowConfig;
+    /** Experimental adaptive auto-pass controller. It never learns an
+     * authorization from allow-once: only an explicit allow-always resolution
+     * may create an enforceable, bounded lease. The initial implementation is
+     * restricted to complete, non-destructive local file writes whose analyzer-
+     * verified targets are absolute paths. */
+    adaptiveAutoPass: AdaptiveAutoPassConfig;
     /** Ordered policy rules. First match wins. */
     rules: GateRule[];
     /** Session-key `:`-delimited segments that auto-pass the approval prompt
@@ -135,6 +141,23 @@ export interface ApprovalWindowConfig {
     /** When true (default), severity "critical" calls always prompt even if a
      *  window is open (e.g. production deploys never get auto-passed). */
     bypassCritical: boolean;
+}
+/** Controls bounded adaptive auto-pass evaluation for repeated file writes. */
+export interface AdaptiveAutoPassConfig {
+    /** off = disabled; shadow = record candidates without changing decisions;
+     * suggest = surface lease suggestions but still require approval; enforce =
+     * consume a lease created by an explicit allow-always decision. */
+    mode: "off" | "shadow" | "suggest" | "enforce";
+    /** Fixed lifetime of an adaptive lease. Always clamped to 1 minute..1 hour. */
+    ttlMs: number;
+    /** Maximum auto-pass authorizations consumable from one adaptive lease.
+     * The budget is deducted before execution and is never refunded from tool
+     * outcome, because execution success is not a safety signal. */
+    maxUses: number;
+    /** Number of matching allow-once approvals before suggest may surface a
+     * lease hint. Shadow reports eligibility without persisting this evidence.
+     * These approvals never create a lease or expand authorization. */
+    suggestAfterApprovals: number;
 }
 export declare const DEFAULT_CONFIG: HumanGateConfig;
 /** host toolKind values that always have side effects → require approval. */

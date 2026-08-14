@@ -162,6 +162,15 @@ messages to untrusted channels.
   use the same non-finite priority or bypass hooks entirely. A future host-owned
   final-params digest/finalizer remains the stronger boundary.
 
-An adaptive mode that auto-passes analyzed commands is explicitly deferred.
-It should only be considered after corpus-based false-negative measurement and
-authoritative shell/runtime metadata are available.
+The experimental adaptive controller is intentionally restricted to analyzer-
+verified absolute-path, non-destructive local file writes. In `enforce` it owns
+the complete reuse path for an eligible call: a miss or state error prompts and
+cannot fall through to a legacy grant/window. Only an explicit `allow-always`
+resolution can mint its fixed-expiry, finite-use lease, and every use is
+atomically deducted before execution. `allow-once` never creates adaptive
+authority.
+
+Adaptive command execution remains deferred. Build/test/format/package scripts
+and Git hooks have transitive behavior that a surface command classifier cannot
+prove, and the current hook contract lacks authoritative execution cwd,
+repository identity, and sandbox provenance.

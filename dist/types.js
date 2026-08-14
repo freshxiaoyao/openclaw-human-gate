@@ -36,6 +36,12 @@ export const DEFAULT_CONFIG = {
         pathFallback: "none",
         bypassCritical: true,
     },
+    adaptiveAutoPass: {
+        mode: "off",
+        ttlMs: 900_000,
+        maxUses: 20,
+        suggestAfterApprovals: 2,
+    },
     rules: [],
     autoPassSessionKeys: [":cron:", ":heartbeat"],
 };

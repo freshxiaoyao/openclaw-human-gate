@@ -58,6 +58,10 @@ its own terminal UI; it reuses OpenClaw's.
   path-bound, and expire after `allowAlwaysTtlMs` (default 4h). The native
   button still reads "allow-always"; internally it is a bounded session/task
   lease, never an unlimited grant.
+- **Experimental adaptive safe-file lease** — an opt-in controller can shadow,
+  suggest, or enforce a finite-use, short-lived lease for completely analyzed,
+  non-destructive file writes with absolute targets. It never learns authority
+  from `allow-once`, and it never applies to shell/Code Mode/network actions.
 - **Auto-pass for cron / heartbeat** — scheduled runs are never blocked on an
   approval nobody can see; critical semantic risks fail immediately by default.
 - **`human_gate_ask` tool** — Claude Code-style "ask the human" for
@@ -221,6 +225,53 @@ permanent grant. Semantic `critical` calls bypass reusable authorization and do
 not offer `allow-always`. Every grant is a **bounded lease** that expires
 `allowAlwaysTtlMs` after it is granted (default 4h); old grants without an
 expiry are discarded on upgrade.
+
+### Experimental adaptive safe-file leases
+
+Adaptive auto-pass is a separate, default-off controller. Its first production
+scope is deliberately narrow: `write`, `edit`, and non-delete/non-move
+`apply_patch` calls whose semantic report is complete, whose only effect and
+category are `local-write` / `filesystem`, and whose analyzer-verified targets
+are absolute paths with a path-bound grant fingerprint.
+
+```json5
+adaptiveAutoPass: {
+  mode: "off",              // "off" | "shadow" | "suggest" | "enforce"
+  ttlMs: 900000,            // fixed lease lifetime; 1 minute..1 hour
+  maxUses: 20,              // deducted before execution; never outcome-refunded
+  suggestAfterApprovals: 2  // allow-once evidence needed for a suggestion
+}
+```
+
+- `off` preserves the existing grant/window behavior.
+- `shadow` emits bounded candidate metadata but changes no decision, approval
+  text, or state.
+- `suggest` keeps legacy authorization behavior and may add a preview-only
+  lease hint after repeated matching `allow-once` approvals. Those approvals
+  are evidence only and never create an authorization.
+- `enforce` owns reuse for eligible safe-file calls. Existing legacy grants and
+  windows are ignored for those calls. `allow-once` authorizes only the current
+  call; an explicit `allow-always` decision creates a path-bound lease with the
+  configured fixed expiry and use budget.
+
+Every adaptive use is atomically deducted from session state before execution.
+An expired, exhausted, malformed, version/config-mismatched, or persistence-
+failed lease prompts again. Tool success is not treated as evidence and a
+failed tool call does not refund a consumed authorization. A `deny` resolution
+revokes matching adaptive evidence and lease state.
+
+The controller never accepts relative paths, delete/move patches, explicit
+user-policy matches, param-scoped rules, critical/destructive/unknown/partial
+analysis, commands, build/test/format, Git operations, network writes, or Code
+Mode. Build/test/format/commit remain eligible only for the existing
+human-approved turn window; adaptive enforcement needs authoritative execution
+cwd/repository identity and a host sandbox first.
+
+Switching from `enforce` back to `off`, `shadow`, or `suggest` restores legacy
+behavior and can expose a still-valid legacy grant/window that predates
+enforcement. For an emergency prompt-every-call rollback, also set
+`rememberAllowAlways: false` and `approvalWindow.mode: "off"` until that state
+has drained.
 
 ### Migration from `match`
 

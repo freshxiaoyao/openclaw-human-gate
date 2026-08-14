@@ -188,6 +188,40 @@
           }
         }
       },
+      "adaptiveAutoPass": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "Bounded adaptive handling for complete, non-destructive local file writes with analyzer-verified absolute targets. allow-once decisions are shadow/suggestion evidence only and never expand authorization; only an explicit allow-always decision can create a lease consumed in enforce mode.",
+        "properties": {
+          "mode": {
+            "type": "string",
+            "enum": ["off", "shadow", "suggest", "enforce"],
+            "default": "off",
+            "description": "off disables adaptive evaluation; shadow records eligible candidates without changing decisions; suggest reports candidates but still prompts; enforce may auto-pass only by consuming a bounded lease created by an explicit allow-always decision."
+          },
+          "ttlMs": {
+            "type": "integer",
+            "minimum": 60000,
+            "maximum": 3600000,
+            "default": 900000,
+            "description": "Fixed adaptive lease lifetime in milliseconds (1 minute to 1 hour)."
+          },
+          "maxUses": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100,
+            "default": 20,
+            "description": "Maximum auto-pass authorizations consumable from one adaptive lease. The budget is deducted before execution and is never refunded based on tool outcome."
+          },
+          "suggestAfterApprovals": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 10,
+            "default": 2,
+            "description": "Matching allow-once approvals needed before suggest surfaces a lease hint. Shadow reports eligibility without persisting evidence. These approvals never create a lease or expand authorization."
+          }
+        }
+      },
       "autoPassSessionKeys": {
         "type": "array",
         "items": { "type": "string" },

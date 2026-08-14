@@ -42,10 +42,13 @@ import { AnalyzerRegistry } from "./analysis/registry.js";
 import { EMPTY_SEMANTIC_REPORT } from "./analysis/types.js";
 import { ApprovalPresenter } from "./preview/presenter.js";
 import { createAuthorizationFingerprint, createPolicyIdentity, } from "./scope.js";
+import { ADAPTIVE_STATE_VERSION, AdaptiveLeaseStore, normalizeAdaptiveState, } from "./adaptive/state.js";
+import { evaluateAdaptiveEligibility } from "./adaptive/eligibility.js";
 const PLUGIN_ID = "human-gate";
 const ASK_TOOL_NAME = "human_gate_ask";
 const ALLOW_ALWAYS_NAMESPACE = "allow-always-v2";
 const WINDOW_NAMESPACE = "approval-window-v2";
+const ADAPTIVE_NAMESPACE = "adaptive-auto-pass-v1";
 const HOOK_PRIORITY = 60;
 // OpenClaw runs typed hooks in descending numeric priority. There is no public
 // finalizer hook, so this ordinary-hook compatibility seal deliberately sorts
@@ -84,6 +87,14 @@ async function patchExtension(api, sessionKey, namespace, fallback, parse, updat
 }
 function truncate(text, max) {
     return text.length <= max ? text : `${text.slice(0, Math.max(0, max - 1))}…`;
+}
+function appendDescriptionHint(description, hint, max) {
+    const combined = `${description}\n${hint}`;
+    return combined.length <= max ? combined : description;
+}
+function adaptiveLeaseLabel(ttlMs, maxUses) {
+    const minutes = Math.max(1, Math.round(ttlMs / 60_000));
+    return `${maxUses}-use/${minutes}-minute`;
 }
 function cloneJsonLike(value, seen, budget, depth) {
     budget.nodes += 1;
@@ -247,14 +258,19 @@ const pluginEntry = definePluginEntry({
             namespace: WINDOW_NAMESPACE,
             description: "Per-session approval windows for Human Gate",
         });
+        api.session.state.registerSessionExtension({
+            namespace: ADAPTIVE_NAMESPACE,
+            description: "Bounded adaptive safe-file leases and non-authorizing approval evidence",
+        });
         const allowAlways = new AllowAlwaysStore((sessionKey) => normalizeAllowAlwaysState(extensionValue(api, sessionKey, ALLOW_ALWAYS_NAMESPACE)), (sessionKey, update) => patchExtension(api, sessionKey, ALLOW_ALWAYS_NAMESPACE, { version: ALLOW_ALWAYS_STATE_VERSION, grants: {} }, normalizeAllowAlwaysState, update), config.allowAlwaysTtlMs);
         const approvalWindow = new ApprovalWindowStore((sessionKey) => normalizeWindowState(extensionValue(api, sessionKey, WINDOW_NAMESPACE)), (sessionKey, update) => patchExtension(api, sessionKey, WINDOW_NAMESPACE, { version: WINDOW_STATE_VERSION, windows: {} }, normalizeWindowState, update));
+        const adaptiveLease = new AdaptiveLeaseStore((sessionKey) => normalizeAdaptiveState(extensionValue(api, sessionKey, ADAPTIVE_NAMESPACE)), (sessionKey, update) => patchExtension(api, sessionKey, ADAPTIVE_NAMESPACE, { version: ADAPTIVE_STATE_VERSION, observations: {}, leases: {} }, normalizeAdaptiveState, update), config.adaptiveAutoPass);
         // The same event object is passed to every ordinary hook. Capture the
         // gate-time snapshot by object identity so an intervening handler cannot
         // defeat the final seal by mutating event.params in place.
         const parameterSeals = new WeakMap();
         // ── Primary approval gate (priority 60) ──
-        api.on("before_tool_call", (event, ctx) => {
+        api.on("before_tool_call", async (event, ctx) => {
             // Skip the ask tool — it has its own dedicated hook below
             if (event.toolName === ASK_TOOL_NAME)
                 return undefined;
@@ -296,6 +312,20 @@ const pluginEntry = definePluginEntry({
                 decision.rule !== undefined &&
                 Object.prototype.hasOwnProperty.call(decision.rule, "paramMatcher");
             const fingerprint = fingerprintFor(config, event, ctx, decision, isParamScopedRule);
+            const adaptiveMode = config.adaptiveAutoPass.mode;
+            const adaptiveEligibility = adaptiveMode === "off"
+                ? undefined
+                : evaluateAdaptiveEligibility({
+                    decision,
+                    fingerprint,
+                    isParamScopedRule,
+                    sessionKey: sessionKey || undefined,
+                    toolCallId: event.toolCallId,
+                    rememberAllowAlways: config.rememberAllowAlways,
+                });
+            // Freeze ownership at gate time. Once enforce owns an eligible call,
+            // a lease miss/error must never fall through to a legacy grant/window.
+            const adaptiveOwns = adaptiveMode === "enforce" && adaptiveEligibility?.eligible === true;
             log.debug?.(logPayload("human-gate: evaluated", {
                 tool: event.toolName,
                 toolKind: event.toolKind,
@@ -304,6 +334,9 @@ const pluginEntry = definePluginEntry({
                 findings: decision.semanticReport.findings.map((finding) => finding.id),
                 semanticComplete: decision.semanticReport.complete,
                 reusableScope: fingerprint?.resolvedScope,
+                adaptiveMode,
+                adaptiveEligible: adaptiveEligibility?.eligible,
+                adaptiveReasons: adaptiveEligibility?.reasonCodes,
                 sessionId: ctx.sessionId,
             }));
             if (decision.mode === "auto") {
@@ -349,40 +382,91 @@ const pluginEntry = definePluginEntry({
                 }));
                 return { params: paramsSnapshot };
             }
-            // 1) permanent allow-always grant
-            if (sessionKey &&
-                config.rememberAllowAlways &&
-                fingerprint?.grantKey &&
-                allowAlways.isGranted(sessionKey, fingerprint, Date.now())) {
-                log.debug?.(logPayload("human-gate: allow-always grant hit", {
-                    rule: decision.rule?.id,
-                    tool: event.toolName,
-                    scope: fingerprint.resolvedScope,
-                }));
-                return { params: paramsSnapshot };
-            }
-            // 2) approval window (turn / time scoped) — suppresses popup fatigue
             const win = config.approvalWindow;
             const now = Date.now();
-            if (sessionKey &&
-                fingerprint &&
-                !approvalWindow.bypasses(win, decision) &&
-                approvalWindow.isOpen(win, sessionKey, fingerprint, ctx.runId, now)) {
-                log.debug?.(logPayload("human-gate: approval-window auto-pass", {
-                    tool: event.toolName,
-                    mode: win.mode,
-                    requestedScope: fingerprint.requestedScope,
-                    resolvedScope: fingerprint.resolvedScope,
-                    runId: ctx.runId,
-                }));
-                return { params: paramsSnapshot };
+            if (adaptiveOwns && fingerprint && sessionKey) {
+                try {
+                    const consumed = await adaptiveLease.consume(sessionKey, fingerprint, now);
+                    log.debug?.(logPayload("human-gate: adaptive lease consume", {
+                        tool: event.toolName,
+                        outcome: consumed.outcome,
+                        scopeDigest: fingerprint.grantKey?.slice(0, 19),
+                        remainingBefore: consumed.remainingBefore,
+                        remainingAfter: consumed.remainingAfter,
+                        legacySuppressed: true,
+                    }));
+                    if (consumed.outcome === "consumed")
+                        return { params: paramsSnapshot };
+                }
+                catch {
+                    // Store failure is an authorization miss. Do not expose exception
+                    // text (which may contain host paths/state); continue to approval.
+                    log.error(logPayload("human-gate: adaptive lease consume failed", {
+                        tool: event.toolName,
+                        outcome: "store-error",
+                        legacySuppressed: true,
+                    }));
+                }
+            }
+            else {
+                // Legacy remembered grants/windows remain unchanged for
+                // off/shadow/suggest and calls outside the safe-file MVP.
+                if (sessionKey &&
+                    config.rememberAllowAlways &&
+                    fingerprint?.grantKey &&
+                    allowAlways.isGranted(sessionKey, fingerprint, now)) {
+                    log.debug?.(logPayload("human-gate: allow-always grant hit", {
+                        rule: decision.rule?.id,
+                        tool: event.toolName,
+                        scope: fingerprint.resolvedScope,
+                    }));
+                    return { params: paramsSnapshot };
+                }
+                if (sessionKey &&
+                    fingerprint &&
+                    !approvalWindow.bypasses(win, decision) &&
+                    approvalWindow.isOpen(win, sessionKey, fingerprint, ctx.runId, now)) {
+                    log.debug?.(logPayload("human-gate: approval-window auto-pass", {
+                        tool: event.toolName,
+                        mode: win.mode,
+                        requestedScope: fingerprint.requestedScope,
+                        resolvedScope: fingerprint.resolvedScope,
+                        runId: ctx.runId,
+                    }));
+                    return { params: paramsSnapshot };
+                }
             }
             const title = truncate(`Approve ${event.toolName}`, 80);
-            const description = presenter.describe(analysisContext, decision);
+            let description = presenter.describe(analysisContext, decision);
             const canRemember = Boolean(sessionKey && config.rememberAllowAlways && fingerprint?.grantKey);
             const allowedDecisions = canRemember
                 ? [...decision.allowedDecisions]
                 : decision.allowedDecisions.filter((item) => item !== "allow-always");
+            let approvalCount = 0;
+            if (adaptiveMode === "suggest" &&
+                adaptiveEligibility?.eligible && sessionKey && fingerprint) {
+                try {
+                    approvalCount = adaptiveLease.approvalCount(sessionKey, fingerprint);
+                }
+                catch {
+                    // Suggestions are non-authorizing UX only. State-read failure must
+                    // neither fail the gate nor suppress the ordinary approval.
+                    log.warn(logPayload("human-gate: adaptive evidence read failed", {
+                        tool: event.toolName,
+                        outcome: "store-error",
+                    }));
+                }
+            }
+            if (adaptiveEligibility?.eligible && allowedDecisions.includes("allow-always")) {
+                const leaseLabel = adaptiveLeaseLabel(config.adaptiveAutoPass.ttlMs, config.adaptiveAutoPass.maxUses);
+                if (adaptiveMode === "enforce") {
+                    description = appendDescriptionHint(description, `Adaptive: allow-always creates a bounded ${leaseLabel} path lease.`, config.previews.maxDescriptionChars);
+                }
+                else if (adaptiveMode === "suggest" &&
+                    approvalCount >= config.adaptiveAutoPass.suggestAfterApprovals) {
+                    description = appendDescriptionHint(description, `Adaptive preview: eligible for a ${leaseLabel} lease in enforce mode.`, config.previews.maxDescriptionChars);
+                }
+            }
             return {
                 // Bind the approval to the exact params that were analyzed and shown.
                 params: paramsSnapshot,
@@ -406,9 +490,11 @@ const pluginEntry = definePluginEntry({
                                 }));
                                 return;
                             }
-                            // Any approval opens the per-session window for subsequent
-                            // matching calls.
-                            if ((res === "allow-once" || res === "allow-always") &&
+                            // Enforce-owned safe-file calls use exactly one authorization
+                            // system. They never mint a legacy window/grant that could
+                            // bypass the adaptive use budget or revive after exhaustion.
+                            if (!adaptiveOwns &&
+                                (res === "allow-once" || res === "allow-always") &&
                                 fingerprint &&
                                 !approvalWindow.bypasses(win, decision)) {
                                 const opened = await approvalWindow.open(win, sessionKey, fingerprint, ctx.runId, Date.now());
@@ -423,7 +509,31 @@ const pluginEntry = definePluginEntry({
                                     }));
                                 }
                             }
-                            if (res === "allow-always" &&
+                            if (adaptiveOwns &&
+                                res === "allow-always" &&
+                                fingerprint) {
+                                const granted = await adaptiveLease.grant(sessionKey, fingerprint, Date.now(), event.toolCallId);
+                                log.info(logPayload("human-gate: adaptive lease resolution", {
+                                    decision: res,
+                                    granted,
+                                    tool: event.toolName,
+                                    scopeDigest: fingerprint.grantKey?.slice(0, 19),
+                                    maxUses: config.adaptiveAutoPass.maxUses,
+                                    ttlMs: config.adaptiveAutoPass.ttlMs,
+                                }));
+                            }
+                            else if (adaptiveOwns &&
+                                res === "deny" &&
+                                fingerprint) {
+                                await adaptiveLease.revoke(sessionKey, fingerprint);
+                                log.info(logPayload("human-gate: adaptive lease revoked", {
+                                    decision: res,
+                                    tool: event.toolName,
+                                    scopeDigest: fingerprint.grantKey?.slice(0, 19),
+                                }));
+                            }
+                            else if (!adaptiveOwns &&
+                                res === "allow-always" &&
                                 canRemember &&
                                 fingerprint?.grantKey) {
                                 await allowAlways.grant(sessionKey, fingerprint, Date.now());
@@ -439,6 +549,18 @@ const pluginEntry = definePluginEntry({
                                     tool: event.toolName,
                                     rule: decision.rule?.id,
                                 }));
+                            }
+                            if (adaptiveMode === "suggest" &&
+                                adaptiveEligibility?.eligible &&
+                                fingerprint &&
+                                res === "allow-once") {
+                                await adaptiveLease.observeApproval(sessionKey, fingerprint, res, Date.now());
+                            }
+                            else if (adaptiveMode === "suggest" &&
+                                adaptiveEligibility?.eligible &&
+                                fingerprint &&
+                                res === "deny") {
+                                await adaptiveLease.revoke(sessionKey, fingerprint);
                             }
                         }
                         catch (err) {

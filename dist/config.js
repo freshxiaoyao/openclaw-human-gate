@@ -42,6 +42,24 @@ function resolveWindowConfig(raw) {
         ttlMs,
     };
 }
+function resolveAdaptiveAutoPass(raw) {
+    const d = DEFAULT_CONFIG.adaptiveAutoPass;
+    if (!isObject(raw) || Array.isArray(raw))
+        return { ...d };
+    const rawMode = ownDataValue(raw, "mode");
+    const mode = rawMode === "off" ||
+        rawMode === "shadow" ||
+        rawMode === "suggest" ||
+        rawMode === "enforce"
+        ? rawMode
+        : d.mode;
+    return {
+        mode,
+        ttlMs: clampInteger(ownDataValue(raw, "ttlMs"), d.ttlMs, 60_000, 3_600_000),
+        maxUses: clampInteger(ownDataValue(raw, "maxUses"), d.maxUses, 1, 100),
+        suggestAfterApprovals: clampInteger(ownDataValue(raw, "suggestAfterApprovals"), d.suggestAfterApprovals, 1, 10),
+    };
+}
 function clampInteger(value, fallback, min, max) {
     if (typeof value !== "number" || !Number.isFinite(value))
         return fallback;
@@ -133,6 +151,7 @@ export function resolveConfig(pluginConfig) {
         return {
             ...DEFAULT_CONFIG,
             approvalWindow: { ...DEFAULT_CONFIG.approvalWindow },
+            adaptiveAutoPass: { ...DEFAULT_CONFIG.adaptiveAutoPass },
             semanticAnalysis: { ...DEFAULT_CONFIG.semanticAnalysis },
             previews: { ...DEFAULT_CONFIG.previews },
             unattendedPolicy: { ...DEFAULT_CONFIG.unattendedPolicy },
@@ -165,6 +184,7 @@ export function resolveConfig(pluginConfig) {
         previews: resolvePreviews(pluginConfig.previews),
         unattendedPolicy: resolveUnattendedPolicy(pluginConfig.unattendedPolicy),
         approvalWindow: resolveWindowConfig(pluginConfig.approvalWindow),
+        adaptiveAutoPass: resolveAdaptiveAutoPass(ownDataValue(pluginConfig, "adaptiveAutoPass")),
         rules: resolveRules(pluginConfig.rules),
         autoPassSessionKeys: Array.isArray(pluginConfig.autoPassSessionKeys)
             ? pluginConfig.autoPassSessionKeys.map(String)

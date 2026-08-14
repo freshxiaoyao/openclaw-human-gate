@@ -163,7 +163,7 @@ test("plugin entry loads and registers against the mock API", async () => {
   assert.equal(calls.registerTool[0].tool.name, "human_gate_ask");
   assert.deepEqual(
     calls.extensions.map((e) => e.namespace).sort(),
-    ["allow-always-v2", "approval-window-v2"],
+    ["adaptive-auto-pass-v1", "allow-always-v2", "approval-window-v2"],
   );
 });
 
