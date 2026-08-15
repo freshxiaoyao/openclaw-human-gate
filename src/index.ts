@@ -72,7 +72,9 @@ import { ApprovalPresenter } from "./preview/presenter.js";
 import {
   createAuthorizationFingerprint,
   createPolicyIdentity,
+  normalizeTrustedRoot,
   type AuthorizationFingerprint,
+  type NormalizedPathDirectory,
 } from "./scope.js";
 import {
   ADAPTIVE_STATE_VERSION,
@@ -320,6 +322,7 @@ function fingerprintFor(
   ctx: ToolCallHookContext,
   decision: EffectiveDecision,
   isParamScopedRule: boolean,
+  trustedRoots: readonly NormalizedPathDirectory[],
 ): AuthorizationFingerprint | undefined {
   if (!decision.windowEligible || isParamScopedRule || !decision.rule) return undefined;
   const policyIdentity = policyIdentityFor(decision, config);
@@ -344,6 +347,8 @@ function fingerprintFor(
     scope: config.approvalWindow.scope,
     pathFallback: config.approvalWindow.pathFallback,
     rulesetVersion: SEMANTIC_RULESET_VERSION,
+    pathMode: config.approvalWindow.pathMode,
+    writeRoots: trustedRoots,
   });
 }
 
@@ -502,34 +507,14 @@ const pluginEntry: OpenClawPluginDefinition = definePluginEntry({
         parameterSeals.set(event, paramsSnapshot);
         // Structural self-protection: file-write / shell-command calls that
         // reference the authority surface (openclaw.json, paths under a
-        // .openclaw directory) are blocked before any analyzer, grant, or
-        // window runs. Escalation-only — pure reads pass through untouched.
-        if (config.selfProtection.enabled) {
-          const sensitive = classifySensitiveEscalation(
-            event.toolName,
-            event.toolKind,
-            paramsSnapshot,
-          );
-          if (sensitive.escalate) {
-            const blockReason = `Human Gate self-protection: call touches the authority surface (${sensitive.hits.map((hit) => hit.marker).join(", ")})`;
-            log.warn(logPayload("human-gate: self-protection block", {
-              tool: event.toolName,
-              markers: sensitive.hits.map((hit) => hit.marker),
-              sessionId: ctx.sessionId,
-            }));
-            decisionLog.record({
-              ts: Date.now(),
-              sessionDigest: digestSessionKey(sessionKey),
-              sessionId: ctx.sessionId,
-              toolName: event.toolName,
-              ruleId: "builtin:self-protection",
-              decision: "block",
-              severity: "critical",
-              reason: blockReason,
-            });
-            return { block: true, blockReason };
-          }
-        }
+        // non-workspace .openclaw directory) are escalated to a critical,
+        // no-allow-always approval — NOT hard-blocked, so the owner can still
+        // approve a legitimate config edit. Escalation-only; pure reads pass
+        // through untouched. In unattended contexts the existing
+        // unattendedPolicy.critical="block" still fails closed.
+        const selfProtection = config.selfProtection.enabled
+          ? classifySensitiveEscalation(event.toolName, event.toolKind, paramsSnapshot)
+          : { hits: [], escalate: false };
         const analysisContext: ToolCallContext = {
           toolName: event.toolName,
           toolKind: event.toolKind,
@@ -541,15 +526,42 @@ const pluginEntry: OpenClawPluginDefinition = definePluginEntry({
           ? analyzerRegistry.analyze(analysisContext)
           : EMPTY_SEMANTIC_REPORT;
         const decision = reduceDecision(baseDecision, semanticReport);
+        // Escalate any non-block decision touching the authority surface to a
+        // critical, interactive approval. A user `block` rule still wins; this
+        // only tightens auto/ask decisions upward.
+        if (selfProtection.escalate && decision.mode !== "block") {
+          decision.mode = "require-approval";
+          decision.severity = "critical";
+          decision.allowedDecisions = ["allow-once", "deny"];
+          decision.reason = `Self-protection: call touches the authority surface (${selfProtection.hits.map((hit) => hit.marker).join(", ")})`;
+          log.info(logPayload("human-gate: self-protection escalation", {
+            tool: event.toolName,
+            markers: selfProtection.hits.map((hit) => hit.marker),
+            sessionId: ctx.sessionId,
+          }));
+        }
         const isParamScopedRule = decision.source === "user" &&
           decision.rule !== undefined &&
           Object.prototype.hasOwnProperty.call(decision.rule, "paramMatcher");
+        // Trusted write roots for "root" path mode: the host-authoritative
+        // execution cwd is an implicit root; configured writeRoots are added
+        // on top. Normalized per call so relative scope resolution is stable.
+        const trustedRoots: NormalizedPathDirectory[] = [];
+        if (typeof ctx.cwd === "string") {
+          const cwdRoot = normalizeTrustedRoot(ctx.cwd);
+          if (cwdRoot) trustedRoots.push(cwdRoot);
+        }
+        for (const root of config.writeRoots) {
+          const normalized = normalizeTrustedRoot(root);
+          if (normalized) trustedRoots.push(normalized);
+        }
         const fingerprint = fingerprintFor(
           config,
           event,
           ctx,
           decision,
           isParamScopedRule,
+          trustedRoots,
         );
         const adaptiveMode = config.adaptiveAutoPass.mode;
         const adaptiveEligibility = adaptiveMode === "off"
@@ -798,6 +810,13 @@ const pluginEntry: OpenClawPluginDefinition = definePluginEntry({
 
         const title = truncate(`Approve ${event.toolName}`, 80);
         let description = presenter.describe(analysisContext, decision);
+        if (selfProtection.escalate) {
+          description = appendDescriptionHint(
+            description,
+            `⚠ Self-protection: this call touches the authority surface (${selfProtection.hits.map((hit) => hit.marker).join(", ")}). Review the exact change below before approving.`,
+            config.previews.maxDescriptionChars,
+          );
+        }
         const canRemember = Boolean(
           sessionKey && config.rememberAllowAlways && fingerprint?.grantKey,
         );

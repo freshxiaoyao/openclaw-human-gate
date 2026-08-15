@@ -1164,14 +1164,27 @@ async function loadP0Handler(pluginConfig) {
   return hookFor(calls, "before_tool_call");
 }
 
-test("self-protection blocks an exec that touches openclaw.json", async () => {
+test("self-protection escalates an exec touching openclaw.json to critical approval", async () => {
   const handler = await loadP0Handler(p0Config());
   const result = await handler(
     { toolName: "exec", toolKind: "exec", params: { command: "Set-Content openclaw.json x" } },
     adaptiveCtx(),
   );
-  assert.ok(result?.block, "self-protection must block config-touching exec");
-  assert.match(result.blockReason, /self-protection/i);
+  assert.ok(result?.requireApproval, "config-touching exec must still be approved, not silently passed");
+  assert.equal(result.requireApproval.severity, "critical");
+  assert.equal(result.requireApproval.allowedDecisions.includes("allow-always"), false);
+  assert.match(result.requireApproval.description, /self-protection/i);
+});
+
+test("self-protection does not escalate writes inside the agent workspace", async () => {
+  const handler = await loadP0Handler(p0Config());
+  const result = await handler(
+    { toolName: "write_file", params: { path: "C:\\Users\\lenovo\\.openclaw\\workspace\\proj\\app.ts" }, toolCallId: "c-ws" },
+    adaptiveCtx(),
+  );
+  assert.ok(result?.requireApproval, "workspace writes still need normal approval");
+  assert.equal(result.requireApproval.severity, "warning", "workspace is not authority surface → not critical");
+  assert.doesNotMatch(result.requireApproval.description, /self-protection/i);
 });
 
 test("self-protection never blocks reading the config", async () => {
@@ -1205,16 +1218,19 @@ test("self-protection covers analyzer-name variants and apply_patch input", asyn
     ["apply_patch", { input: "*** Update File: openclaw.json" }],
   ]) {
     const result = await handler({ toolName: name, params, toolCallId: `c-${name}` }, ctx);
-    assert.ok(result?.block, `${name} must be blocked by self-protection`);
-    assert.match(result.blockReason, /self-protection/i);
+    assert.ok(result?.requireApproval, `${name} must be escalated by self-protection`);
+    assert.equal(result.requireApproval.severity, "critical");
+    assert.equal(result.requireApproval.allowedDecisions.includes("allow-always"), false);
+    assert.match(result.requireApproval.description, /self-protection/i);
   }
 
-  // Same envelope, clean path → ordinary approval, not blocked.
+  // Same envelope, clean path → ordinary (non-critical) approval.
   const clean = await handler(
     { toolName: "writeFile", params: { path: "C:\\repo\\src\\app.ts" }, toolCallId: "c-clean" },
     ctx,
   );
-  assert.equal(clean?.block ?? false, false, "clean writes are not self-protection blocked");
+  assert.ok(clean?.requireApproval, "clean writes still require approval");
+  assert.notEqual(clean.requireApproval.severity, "critical");
 });
 
 test("deny cooldown blocks an immediate repeat", async () => {

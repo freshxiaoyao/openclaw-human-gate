@@ -32,6 +32,12 @@ export interface FingerprintOptions {
     pathFallback?: PathScopeFallback;
     /** Bump whenever analyzer semantics change to invalidate earlier grants. */
     rulesetVersion: string;
+    /** "root" mode remaps a path scope to its nearest trusted root so one
+     * approval authorizes the whole subtree (recursive). "directory" (default)
+     * keeps the exact-directory behavior. */
+    pathMode?: "directory" | "root";
+    /** Normalized trusted roots; only consulted when pathMode === "root". */
+    writeRoots?: readonly NormalizedPathDirectory[];
 }
 export interface FingerprintIdentity {
     toolName: string;
@@ -67,6 +73,12 @@ export interface NormalizedPathScope {
     /** Sorted, de-duplicated exact directories; never a common ancestor. */
     directories: NormalizedPathDirectory[];
 }
+/** True when `candidate` is `stored` or sits under it (separator-bounded,
+ * same kind + volume). Recursive containment for "root" path mode. */
+export declare function underDirectory(stored: NormalizedPathDirectory, candidate: NormalizedPathDirectory): boolean;
+/** Normalize a raw absolute directory path into the same canonical form the
+ * fingerprint uses, so trusted roots compare cleanly against scope dirs. */
+export declare function normalizeTrustedRoot(raw: string): NormalizedPathDirectory | undefined;
 /** Return a bounded exact set of canonical parent directories. */
 export declare function normalizePathScope(targets: readonly VerifiedScopeTarget[], executionCwd?: string): NormalizedPathScope | undefined;
 /** Stable digest of every authorization-relevant policy field. */

@@ -41,6 +41,12 @@ export interface FingerprintOptions {
   pathFallback?: PathScopeFallback;
   /** Bump whenever analyzer semantics change to invalidate earlier grants. */
   rulesetVersion: string;
+  /** "root" mode remaps a path scope to its nearest trusted root so one
+   * approval authorizes the whole subtree (recursive). "directory" (default)
+   * keeps the exact-directory behavior. */
+  pathMode?: "directory" | "root";
+  /** Normalized trusted roots; only consulted when pathMode === "root". */
+  writeRoots?: readonly NormalizedPathDirectory[];
 }
 
 export interface FingerprintIdentity {
@@ -220,6 +226,57 @@ function directoryIdentity(directory: NormalizedPathDirectory): string {
   return `${directory.kind}\0${directory.volume}\0${directory.path}`;
 }
 
+/** True when `candidate` is `stored` or sits under it (separator-bounded,
+ * same kind + volume). Recursive containment for "root" path mode. */
+export function underDirectory(
+  stored: NormalizedPathDirectory,
+  candidate: NormalizedPathDirectory,
+): boolean {
+  if (stored.kind !== candidate.kind || stored.volume !== candidate.volume) return false;
+  if (candidate.path === stored.path) return true;
+  const sep = candidate.kind === "posix" ? "/" : "\\";
+  return candidate.path.startsWith(stored.path + sep);
+}
+
+/** Normalize a raw absolute directory path into the same canonical form the
+ * fingerprint uses, so trusted roots compare cleanly against scope dirs. */
+export function normalizeTrustedRoot(raw: string): NormalizedPathDirectory | undefined {
+  if (typeof raw !== "string" || raw.length === 0) return undefined;
+  const parsed = parseAbsolutePath(raw, true);
+  if (!parsed) return undefined;
+  return renderDirectory(parsed);
+}
+
+/** Nearest containing trusted root (longest prefix), or undefined. */
+function nearestRoot(
+  dir: NormalizedPathDirectory,
+  roots: readonly NormalizedPathDirectory[],
+): NormalizedPathDirectory | undefined {
+  let best: NormalizedPathDirectory | undefined;
+  for (const root of roots) {
+    if (underDirectory(root, dir)) {
+      if (!best || root.path.length > best.path.length) best = root;
+    }
+  }
+  return best;
+}
+
+/** Remap each directory to its nearest trusted root; directories outside any
+ * root stay exact. De-duplicated and sorted, bounded like the original set. */
+function remapDirectories(
+  scope: NormalizedPathScope,
+  roots: readonly NormalizedPathDirectory[],
+): NormalizedPathScope {
+  const unique = new Map<string, NormalizedPathDirectory>();
+  for (const dir of scope.directories) {
+    const mapped = nearestRoot(dir, roots) ?? dir;
+    unique.set(directoryIdentity(mapped), mapped);
+  }
+  const directories = [...unique.values()].sort((a, b) =>
+    directoryIdentity(a).localeCompare(directoryIdentity(b), "en"));
+  return { directories };
+}
+
 /** Return a bounded exact set of canonical parent directories. */
 export function normalizePathScope(
   targets: readonly VerifiedScopeTarget[],
@@ -337,6 +394,13 @@ export function createAuthorizationFingerprint(
     policyIdentity,
   };
   const pathScope = normalizePathScope(context.verifiedTargets, context.executionCwd);
+  // "root" mode: remap the exact directory set to the nearest trusted root so
+  // one approval covers the whole subtree; directories outside any root keep
+  // their exact-directory semantics (no broadening from high-level dirs).
+  const effectivePathScope =
+    options.pathMode === "root" && pathScope && options.writeRoots?.length
+      ? remapDirectories(pathScope, options.writeRoots)
+      : pathScope;
   const requestedScope = options.scope;
   let resolvedScope: ApprovalScope = requestedScope;
   if (requestedScope === "path" && !pathScope) {
@@ -359,7 +423,7 @@ export function createAuthorizationFingerprint(
         ? { identity, effects }
         : resolvedScope === "category"
           ? { identity, effects, categories }
-          : { identity, effects, categories, path: pathScope };
+          : { identity, effects, categories, path: effectivePathScope };
   const windowCanonical = {
     fingerprintVersion: AUTHORIZATION_FINGERPRINT_VERSION,
     rulesetVersion,
@@ -368,14 +432,14 @@ export function createAuthorizationFingerprint(
     projection,
   };
   const windowKey = digest("win", windowCanonical);
-  const grantKey = pathScope
+  const grantKey = effectivePathScope
     ? digest("grant", {
         fingerprintVersion: AUTHORIZATION_FINGERPRINT_VERSION,
         rulesetVersion,
         identity,
         effects,
         categories,
-        path: pathScope,
+        path: effectivePathScope,
       })
     : undefined;
   return {

@@ -68,6 +68,7 @@ test("approval window numeric and boolean controls remain bounded", () => {
       pathFallback: "category",
       ttlMs: 3_600_000,
       bypassCritical: false,
+      pathMode: "directory",
     },
   );
   assert.equal(resolveConfig({ approvalWindow: { ttlMs: -1 } }).approvalWindow.ttlMs, 1000);

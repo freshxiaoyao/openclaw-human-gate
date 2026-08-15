@@ -35,6 +35,7 @@ export const DEFAULT_CONFIG = {
         scope: "path",
         pathFallback: "none",
         bypassCritical: true,
+        pathMode: "directory",
     },
     adaptiveAutoPass: {
         mode: "off",
@@ -57,6 +58,7 @@ export const DEFAULT_CONFIG = {
     },
     rules: [],
     autoPassSessionKeys: [":cron:", ":heartbeat"],
+    writeRoots: [],
 };
 /** host toolKind values that always have side effects → require approval. */
 export const DESTRUCTIVE_TOOL_KINDS = new Set([

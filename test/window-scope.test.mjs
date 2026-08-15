@@ -7,6 +7,7 @@ import {
   createAuthorizationFingerprint,
   createPolicyIdentity,
   normalizePathScope,
+  normalizeTrustedRoot,
 } from "../dist/scope.js";
 import {
   ApprovalWindowStore,
@@ -397,4 +398,44 @@ test("opening windows removes expired entries and enforces a hard capacity", asy
   const replacement = fingerprint({ ruleId: "after-expiry" }, { scope: "effect" });
   await store.open(cfg, "session", replacement, undefined, 20_000);
   assert.equal(Object.keys(store.snapshot("session").windows).length, 1);
+});
+
+test("root path mode remaps a scope to its nearest trusted root", () => {
+  const root = normalizeTrustedRoot("C:\\repo");
+  assert.ok(root, "C:\\repo normalizes to a trusted root");
+  const opts = { pathMode: "root", writeRoots: [root] };
+
+  const a = fingerprint(
+    { verifiedTargets: [{ path: "C:\\repo\\src\\a.ts", targetKind: "file" }] },
+    opts,
+  );
+  const b = fingerprint(
+    { verifiedTargets: [{ path: "C:\\repo\\lib\\b.ts", targetKind: "file" }] },
+    opts,
+  );
+  assert.ok(a?.windowKey && b?.windowKey, "both under the root must produce keys");
+  assert.equal(a.windowKey, b.windowKey, "sibling subdirs share the recursive root scope");
+});
+
+test("root path mode keeps outside-root writes exact (no high-level broadening)", () => {
+  const root = normalizeTrustedRoot("C:\\repo");
+  const opts = { pathMode: "root", writeRoots: [root] };
+
+  const inside = fingerprint(
+    { verifiedTargets: [{ path: "C:\\repo\\src\\a.ts", targetKind: "file" }] },
+    opts,
+  );
+  const outside = fingerprint(
+    { verifiedTargets: [{ path: "C:\\Users\\me\\Desktop\\x.txt", targetKind: "file" }] },
+    opts,
+  );
+  assert.ok(inside?.windowKey && outside?.windowKey);
+  assert.notEqual(inside.windowKey, outside.windowKey, "outside a root stays exact → no volume-wide grant");
+});
+
+test("directory path mode (default) keeps different directories distinct", () => {
+  const a = fingerprint({ verifiedTargets: [{ path: "C:\\repo\\src\\a.ts", targetKind: "file" }] });
+  const b = fingerprint({ verifiedTargets: [{ path: "C:\\repo\\lib\\b.ts", targetKind: "file" }] });
+  assert.ok(a?.windowKey && b?.windowKey);
+  assert.notEqual(a.windowKey, b.windowKey, "without root mode, sibling dirs are separate scopes");
 });

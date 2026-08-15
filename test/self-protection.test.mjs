@@ -37,6 +37,29 @@ test("file write under a .openclaw path escalates", () => {
   assert.equal(hits[0].marker, ".openclaw");
 });
 
+test("the agent workspace under .openclaw is NOT authority surface", () => {
+  assert.equal(
+    classifySensitiveEscalation("write", "write", { path: "C:\\Users\\lenovo\\.openclaw\\workspace\\proj\\app.ts" }).escalate,
+    false,
+    "~/.openclaw/workspace/** is the agent's working area, not authority surface",
+  );
+  assert.equal(
+    classifySensitiveEscalation("write", "write", { path: "C:\\Users\\lenovo\\.openclaw\\Workspace\\x" }).escalate,
+    false,
+    "case-insensitive workspace",
+  );
+  assert.equal(
+    classifySensitiveEscalation("write", "write", { path: "C:\\Users\\lenovo\\.openclaw\\extensions\\foo\\index.js" }).escalate,
+    true,
+    "extensions under .openclaw remain authority surface",
+  );
+  assert.equal(
+    classifySensitiveEscalation("write", "write", { path: "C:\\Users\\lenovo\\.openclaw\\openclaw.json" }).escalate,
+    true,
+    "the config file itself is still authority surface",
+  );
+});
+
 test("apply_patch whose patch body touches openclaw.json escalates", () => {
   const { escalate } = classifySensitiveEscalation("apply_patch", "apply_patch", {
     patch: "*** Begin Patch\n*** Update File: openclaw.json\n*** End Patch",

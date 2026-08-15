@@ -191,6 +191,12 @@
             "type": "boolean",
             "default": true,
             "description": "severity 'critical' calls always prompt even when a window is open (e.g. production deploys)."
+          },
+          "pathMode": {
+            "type": "string",
+            "enum": ["directory", "root"],
+            "default": "directory",
+            "description": "directory = a path scope covers only its exact directory (sibling writes). root = a scope is remapped to the nearest trusted write root so one approval authorizes the whole subtree (recursive), but only for paths under a configured root — never for arbitrary high-level dirs."
           }
         }
       },
@@ -233,6 +239,12 @@
         "items": { "type": "string" },
         "default": [":cron:", ":heartbeat"],
         "description": "Exact colon-delimited session-key segments that auto-pass non-critical approval prompts. Critical calls follow unattendedPolicy."
+      },
+      "writeRoots": {
+        "type": "array",
+        "items": { "type": "string" },
+        "default": [],
+        "description": "Trusted write roots (absolute paths or ~/...). When approvalWindow.pathMode is 'root', a path scope under one of these roots is remapped to the root so one approval authorizes the whole subtree (recursive). The agent workspace is always an implicit root."
       },
       "denyCooldownMs": {
         "type": "integer",

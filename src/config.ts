@@ -51,12 +51,16 @@ function resolveWindowConfig(raw: unknown): ApprovalWindowConfig {
   const bypassCritical = typeof raw.bypassCritical === "boolean"
     ? raw.bypassCritical
     : d.bypassCritical;
+  const pathMode = raw.pathMode === "root" || raw.pathMode === "directory"
+    ? raw.pathMode
+    : d.pathMode;
   return {
     mode,
     scope,
     pathFallback,
     bypassCritical,
     ttlMs,
+    pathMode,
   };
 }
 
@@ -222,6 +226,7 @@ export function resolveConfig(pluginConfig: unknown): HumanGateConfig {
       floodDetector: { ...DEFAULT_CONFIG.floodDetector },
       rules: [...DEFAULT_CONFIG.rules],
       autoPassSessionKeys: [...DEFAULT_CONFIG.autoPassSessionKeys],
+      writeRoots: [...DEFAULT_CONFIG.writeRoots],
     };
   }
   return {
@@ -270,5 +275,8 @@ export function resolveConfig(pluginConfig: unknown): HumanGateConfig {
     autoPassSessionKeys: Array.isArray(pluginConfig.autoPassSessionKeys)
       ? (pluginConfig.autoPassSessionKeys as unknown[]).map(String)
       : [...DEFAULT_CONFIG.autoPassSessionKeys],
+    writeRoots: Array.isArray(pluginConfig.writeRoots)
+      ? (pluginConfig.writeRoots as unknown[]).map(String).filter((s) => s.trim().length > 0)
+      : [...DEFAULT_CONFIG.writeRoots],
   };
 }

@@ -34,12 +34,16 @@ function resolveWindowConfig(raw) {
     const bypassCritical = typeof raw.bypassCritical === "boolean"
         ? raw.bypassCritical
         : d.bypassCritical;
+    const pathMode = raw.pathMode === "root" || raw.pathMode === "directory"
+        ? raw.pathMode
+        : d.pathMode;
     return {
         mode,
         scope,
         pathFallback,
         bypassCritical,
         ttlMs,
+        pathMode,
     };
 }
 function resolveAdaptiveAutoPass(raw) {
@@ -194,6 +198,7 @@ export function resolveConfig(pluginConfig) {
             floodDetector: { ...DEFAULT_CONFIG.floodDetector },
             rules: [...DEFAULT_CONFIG.rules],
             autoPassSessionKeys: [...DEFAULT_CONFIG.autoPassSessionKeys],
+            writeRoots: [...DEFAULT_CONFIG.writeRoots],
         };
     }
     return {
@@ -230,6 +235,9 @@ export function resolveConfig(pluginConfig) {
         autoPassSessionKeys: Array.isArray(pluginConfig.autoPassSessionKeys)
             ? pluginConfig.autoPassSessionKeys.map(String)
             : [...DEFAULT_CONFIG.autoPassSessionKeys],
+        writeRoots: Array.isArray(pluginConfig.writeRoots)
+            ? pluginConfig.writeRoots.map(String).filter((s) => s.trim().length > 0)
+            : [...DEFAULT_CONFIG.writeRoots],
     };
 }
 //# sourceMappingURL=config.js.map

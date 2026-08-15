@@ -43,8 +43,11 @@ const PATCH_TOOLS = new Set([MUTATION_TOOL_NAMES.applyPatch, "applypatch"]);
 const PATCH_PARAMS = [...MUTATION_PATCH_KEYS];
 const MAX_SCAN_LENGTH = 16_384;
 const MAX_HITS = 8;
-/** Path-component match for a `.openclaw` directory (any filesystem style). */
-const DIR_MARKER_RE = /(^|[\\/])\.openclaw([\\/]|$)/;
+/** Path-component match for a `.openclaw` directory (any filesystem style),
+ * EXCLUDING its `workspace` subdirectory — the agent's own working area lives
+ * at `~/.openclaw/workspace` and must stay writable. Everything else under
+ * `.openclaw` (config, extensions, keys, sessions) is authority surface. */
+const DIR_MARKER_RE = /(^|[\\/])\.openclaw(?![\\/]workspace([\\/]|$))([\\/]|$)/i;
 /** Word-boundary filename match for the config file itself. */
 const CONFIG_MARKER_RE = /\bopenclaw\.json\b/;
 /** Scan only the parameters that can carry a filesystem/command target. */

@@ -122,6 +122,11 @@ export interface HumanGateConfig {
    *  matches `agent:main:cron:run-1` but not `x:cronx:`). Auto-pass exempts
    *  ONLY require-approval prompts — `block` rules are still enforced. */
   autoPassSessionKeys: string[];
+  /** Trusted write roots (absolute paths or `~/...`). When
+   *  approvalWindow.pathMode is "root", a path scope under one of these roots
+   *  is remapped to the root so one approval authorizes the whole subtree
+   *  (recursive). The agent workspace is always an implicit root. */
+  writeRoots: string[];
 }
 
 export interface SemanticAnalysisConfig {
@@ -166,6 +171,11 @@ export interface ApprovalWindowConfig {
   /** When true (default), severity "critical" calls always prompt even if a
    *  window is open (e.g. production deploys never get auto-passed). */
   bypassCritical: boolean;
+  /** "directory" (default) = a scope covers only its exact directory (sibling
+   *  writes). "root" = a scope is remapped to the nearest trusted write root,
+   *  so one approval authorizes the whole subtree (recursive) — but only for
+   *  paths under a configured root, never for arbitrary high-level dirs. */
+  pathMode: "directory" | "root";
 }
 
 /** Self-protection escalation (remit-style sensitive target classification). */
@@ -244,6 +254,7 @@ export const DEFAULT_CONFIG: HumanGateConfig = {
     scope: "path",
     pathFallback: "none",
     bypassCritical: true,
+    pathMode: "directory",
   },
   adaptiveAutoPass: {
     mode: "off",
@@ -266,6 +277,7 @@ export const DEFAULT_CONFIG: HumanGateConfig = {
   },
   rules: [],
   autoPassSessionKeys: [":cron:", ":heartbeat"],
+  writeRoots: [],
 };
 
 /** host toolKind values that always have side effects → require approval. */
