@@ -84,7 +84,7 @@ remit grants.ts：`NEVER_GRANTABLE = ["spend-money","change-settings"]`——即
 - `src/index.ts`：allow-always 结算时，若 grant 是宽泛形（无 path 的 category/effect 级）→ 弹二次确认（复用 approval 流）或直接拒绝并提示。
 - 顺带：`src/scope.ts` 已保证 grantKey 必须 path-bound 才存在——NEVER_GRANTABLE 是第二道闸，防御"手写配置/未来改动引入宽泛 grant"。
 
-### P1-2 flood detector（审批洪泛检测）
+### P1-2 flood detector（审批洪泛检测） ✅（v0.5.1）
 
 remit：Review Queue Flood detector——高频 ask = 你在橡皮图章 → **主动建议** grant，而不是默默继续弹。
 

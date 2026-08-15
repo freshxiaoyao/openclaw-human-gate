@@ -275,6 +275,31 @@
           }
         }
       },
+      "floodDetector": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "Non-authorizing approval-flood detector: surfaces a hint when ask prompts arrive at a high rate (the rubber-stamping failure mode). Never auto-passes anything.",
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "default": true
+          },
+          "windowMs": {
+            "type": "integer",
+            "minimum": 1000,
+            "maximum": 600000,
+            "default": 60000,
+            "description": "Trailing window over which ask decisions are counted."
+          },
+          "threshold": {
+            "type": "integer",
+            "minimum": 2,
+            "maximum": 1000,
+            "default": 8,
+            "description": "Ask count at/above which a hint is surfaced in the approval description."
+          }
+        }
+      },
       "rules": {
         "type": "array",
         "description": "Ordered policy rules. First match wins.",

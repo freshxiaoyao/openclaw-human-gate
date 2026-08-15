@@ -1322,3 +1322,58 @@ test("cooldown persistence failure never interrupts adaptive lease revocation", 
   assert.ok(after?.requireApproval, "no trust remains after the deny");
   assert.equal(after?.block ?? false, false, "cooldown failure fails toward asking, not blocking");
 });
+
+test("flood detector surfaces a hint once asks cross the threshold", async () => {
+  const handler = await loadP0Handler(p0Config({
+    denyCooldownMs: 0,
+    floodDetector: { enabled: true, windowMs: 60_000, threshold: 3 },
+  }));
+  const ctx = adaptiveCtx();
+  const writeEvent = (i) => ({
+    toolName: "write_file",
+    params: { path: `C:\\repo\\dir-${i}\\a.ts` },
+    toolCallId: `call-${i}`,
+  });
+
+  // Each call is a distinct directory scope → a fresh ask (no window reuse).
+  // askRate counts PRIOR asks when a description is built, so the hint first
+  // appears on the (threshold+1)-th ask.
+  const results = [];
+  for (let i = 0; i < 4; i += 1) {
+    results.push(await handler(writeEvent(i), ctx));
+  }
+
+  for (let i = 0; i < 3; i += 1) {
+    assert.ok(results[i]?.requireApproval);
+    assert.doesNotMatch(
+      results[i].requireApproval.description,
+      /High approval rate/i,
+      `ask #${i + 1} should not yet surface the flood hint`,
+    );
+  }
+  assert.ok(results[3]?.requireApproval);
+  assert.match(
+    results[3].requireApproval.description,
+    /High approval rate detected/i,
+    "the 4th ask crosses the threshold and surfaces the hint",
+  );
+});
+
+test("flood detector disabled leaves the description unchanged", async () => {
+  const handler = await loadP0Handler(p0Config({
+    denyCooldownMs: 0,
+    floodDetector: { enabled: false, windowMs: 60_000, threshold: 2 },
+  }));
+  const ctx = adaptiveCtx();
+  const writeEvent = (i) => ({
+    toolName: "write_file",
+    params: { path: `C:\\repo\\dir-${i}\\a.ts` },
+    toolCallId: `call-${i}`,
+  });
+
+  for (let i = 0; i < 5; i += 1) {
+    const result = await handler(writeEvent(i), ctx);
+    assert.ok(result?.requireApproval);
+    assert.doesNotMatch(result.requireApproval.description, /High approval rate/i);
+  }
+});

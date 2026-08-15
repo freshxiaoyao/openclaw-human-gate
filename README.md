@@ -335,6 +335,11 @@ destructive toolKinds → name-token classifier → `defaultMode`. See
             maxEntries: 512,
             // filePath: "~/.openclaw/human-gate/decisions.jsonl"  // optional audit trail
           },
+          floodDetector: {
+            enabled: true,
+            windowMs: 60000,
+            threshold: 8
+          },
           rules: [
             {
               id: "process-observation-auto",

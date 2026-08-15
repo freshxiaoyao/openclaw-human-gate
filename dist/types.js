@@ -50,6 +50,11 @@ export const DEFAULT_CONFIG = {
         enabled: true,
         maxEntries: 512,
     },
+    floodDetector: {
+        enabled: true,
+        windowMs: 60_000,
+        threshold: 8,
+    },
     rules: [],
     autoPassSessionKeys: [":cron:", ":heartbeat"],
 };

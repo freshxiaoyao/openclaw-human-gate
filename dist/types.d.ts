@@ -108,6 +108,8 @@ export interface HumanGateConfig {
     /** Best-effort decision audit trail (memory ring buffer + optional JSONL).
      * Recording failures never change an enforcement outcome. */
     decisionLog: DecisionLogConfig;
+    /** Approval-flood detector: non-authorizing hint when ask rate is high. */
+    floodDetector: FloodDetectorConfig;
     /** Ordered policy rules. First match wins. */
     rules: GateRule[];
     /** Session-key `:`-delimited segments that auto-pass the approval prompt
@@ -172,6 +174,15 @@ export interface DecisionLogConfig {
      * only. Write failures are swallowed — the log is never an enforcement
      * dependency. */
     filePath?: string;
+}
+/** Approval-flood detector: surfaces a non-authorizing hint when asks arrive
+ *  at a high rate (the rubber-stamping failure mode). Never auto-passes. */
+export interface FloodDetectorConfig {
+    enabled: boolean;
+    /** Trailing window over which ask decisions are counted. */
+    windowMs: number;
+    /** Ask count at/above which a hint is surfaced in the approval description. */
+    threshold: number;
 }
 /** Controls bounded adaptive auto-pass evaluation for repeated file writes. */
 export interface AdaptiveAutoPassConfig {

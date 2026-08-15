@@ -842,6 +842,19 @@ const pluginEntry: OpenClawPluginDefinition = definePluginEntry({
             );
           }
         }
+        // Approval-flood detector: non-authorizing UX only. When asks are
+        // arriving at a high rate (the rubber-stamping failure mode), surface
+        // a hint to open a grant or narrow rules — never auto-pass anything.
+        if (config.floodDetector.enabled) {
+          const askRate = decisionLog.askRate(config.floodDetector.windowMs);
+          if (askRate >= config.floodDetector.threshold) {
+            description = appendDescriptionHint(
+              description,
+              `High approval rate detected (${askRate} prompts in the last ${Math.round(config.floodDetector.windowMs / 1000)}s) — consider allow-always on this rule or narrowing your rules to reduce repeated prompts.`,
+              config.previews.maxDescriptionChars,
+            );
+          }
+        }
 
         const askedAt = Date.now();
         decisionLog.record({
