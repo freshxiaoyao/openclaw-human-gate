@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+permissions:
+  contents: read
+
+# Cancel a superseded run for the same branch/PR instead of queueing it.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: "install → build → typecheck → test (Node ${{ matrix.node }})"
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # OpenClaw SDK engines: >=22.22.3 <23 || >=24.15.0 <25 || >=25.9.0.
+        node: ["22", "24"]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node ${{ matrix.node }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Test
+        run: npm test
+
+      # `dist/` is committed and shipped (`files: ["dist"]`), so a stale build
+      # would publish old code. This gate fails CI if a fresh `tsc` build does
+      # not reproduce the committed dist exactly.
+      - name: Verify committed dist is in sync
+        run: git diff --exit-code -- dist
