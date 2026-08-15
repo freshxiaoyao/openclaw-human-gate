@@ -1,0 +1,5 @@
+# Keep shipped build output line-ending deterministic across OS.
+# `dist/` is committed and CI verifies a fresh `tsc` build reproduces it
+# exactly (`git diff --exit-code -- dist`); forcing LF removes CRLF churn
+# on Windows checkouts that would otherwise make that gate false-positive.
+dist/** text eol=lf

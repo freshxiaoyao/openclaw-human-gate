@@ -16,7 +16,10 @@ concurrency:
 jobs:
   test:
     name: "install → build → typecheck → test (Node ${{ matrix.node }})"
-    runs-on: ubuntu-latest
+    # The test suite is Windows-first: path-scoped fingerprints/grants use
+    # drive-letter absolute paths and there are dedicated windows-drive/UNC
+    # normalization assertions, so the matrix runs on the Windows runner.
+    runs-on: windows-latest
     strategy:
       fail-fast: false
       matrix:
