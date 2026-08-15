@@ -9,6 +9,16 @@ const EDIT_PAYLOAD_KEYS = [
     "oldText", "old_text", "oldString", "old_string", "search",
     "newText", "new_text", "newString", "new_string", "replace",
 ];
+/** Canonical mutation-tool vocabulary, exported so policy layers (e.g.
+ * self-protection) share the analyzer's single source of truth and never
+ * drift from the envelope shapes the analyzer actually recognizes. */
+export const MUTATION_TOOL_NAMES = {
+    write: WRITE_NAMES,
+    edit: EDIT_NAMES,
+    applyPatch: APPLY_PATCH_NAME,
+};
+export const MUTATION_PATH_KEYS = PATH_KEYS;
+export const MUTATION_PATCH_KEYS = PATCH_KEYS;
 function allowedEnvelopeKeys(toolName) {
     if (WRITE_NAMES.has(toolName)) {
         return new Set([...PATH_KEYS, ...WRITE_PAYLOAD_KEYS]);

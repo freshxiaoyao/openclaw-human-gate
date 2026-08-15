@@ -72,17 +72,57 @@ test("entries are bounded to safe field lengths", () => {
   assert.equal(entry.reason.length, 500);
 });
 
-test("filePath appends JSONL lines best-effort", () => {
+test("filePath appends JSONL lines best-effort", async () => {
   const dir = mkdtempSync(join(tmpdir(), "hg-decision-"));
   const file = join(dir, "decisions.jsonl");
   const log = new DecisionLog(logConfig({ filePath: file }));
   log.record({ ts: 1000, sessionDigest: "a", toolName: "write", decision: "ask" });
   log.record({ ts: 2000, sessionDigest: "a", toolName: "write", decision: "deny" });
+  await log.flush();
 
   const lines = readFileSync(file, "utf8").trim().split("\n");
   assert.equal(lines.length, 2);
   assert.equal(JSON.parse(lines[0]).decision, "ask");
   assert.equal(JSON.parse(lines[1]).decision, "deny");
+  if (process.platform !== "win32") {
+    const { statSync } = await import("node:fs");
+    assert.equal(statSync(file).mode & 0o777, 0o600, "log file must be owner-only");
+  }
+});
+
+test("async appends do not block record()", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "hg-decision-"));
+  const file = join(dir, "decisions.jsonl");
+  const log = new DecisionLog(logConfig({ filePath: file }));
+  const started = Date.now();
+  for (let i = 0; i < 200; i += 1) {
+    log.record({ ts: i, sessionDigest: "a", toolName: "t", decision: "ask" });
+  }
+  const elapsed = Date.now() - started;
+  await log.flush();
+  const lines = readFileSync(file, "utf8").trim().split("\n");
+  assert.equal(lines.length, 200);
+  assert.ok(elapsed < 1000, `200 records should not block: took ${elapsed}ms`);
+});
+
+test("askWindow is pruned on record even when askRate is never called", () => {
+  const log = new DecisionLog(logConfig());
+  const retention = 3_600_000;
+  log.record({ ts: 1000, sessionDigest: "a", toolName: "t", decision: "ask" });
+  // A far-future ask prunes the stale one at record time.
+  log.record({ ts: 1000 + retention + 1, sessionDigest: "a", toolName: "t", decision: "ask" });
+  assert.equal(
+    log.askRate(Number.MAX_SAFE_INTEGER, 1000 + retention + 1),
+    1,
+    "the stale ask was pruned on record, not only on askRate",
+  );
+});
+
+test("askRate windows are clamped to the retention", () => {
+  const log = new DecisionLog(logConfig());
+  log.record({ ts: 1_000_000, sessionDigest: "a", toolName: "t", decision: "ask" });
+  // A window larger than the retention must not resurrect pruned entries.
+  assert.equal(log.askRate(86_400_000, 1_000_001), 1);
 });
 
 test("digestSessionKey is stable and bounded", () => {

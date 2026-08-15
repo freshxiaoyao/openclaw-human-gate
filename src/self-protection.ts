@@ -12,6 +12,12 @@
  * (`read`, `openclaw doctor`, `status`) stays usable. Only carriers that
  * can mutate are escalated — destructive toolKinds, file tools, and
  * unknown tools (fail-closed).
+ *
+ * Tool-name and parameter shapes are aligned with the semantic analyzer's
+ * canonical vocabulary (see `analysis/file-mutation.ts`), so the scan
+ * covers the same envelopes the analyzer trusts: write/write_file/writefile,
+ * edit/edit_file/editfile, apply_patch (canonical `input`), and exec-like
+ * command parameters.
  */
 
 import {
@@ -21,6 +27,11 @@ import {
   READONLY_TOOL_KINDS,
 } from "./types.js";
 import { tokenizeName } from "./policy.js";
+import {
+  MUTATION_PATH_KEYS,
+  MUTATION_PATCH_KEYS,
+  MUTATION_TOOL_NAMES,
+} from "./analysis/file-mutation.js";
 
 export const SELF_PROTECTION_VERSION = 1 as const;
 
@@ -28,9 +39,22 @@ export const SELF_PROTECTION_VERSION = 1 as const;
 const EXEC_TOOLS = new Set<string>(["exec", "process", "code_mode_exec"]);
 const EXEC_PARAMS = ["command", "cmd", "code", "script", "args"];
 
-/** File-like tools: scan their path/content parameters. */
-const FILE_TOOLS = new Set<string>(["write", "edit", "apply_patch", "file_write"]);
-const FILE_PARAMS = ["path", "file", "target", "to", "dest", "destination", "dir", "directory", "patch", "content"];
+/** File-write/edit tools: scan path parameters only. Payload/content fields
+ * can legitimately mention `openclaw.json` and must not false-positive. */
+const FILE_TOOLS = new Set<string>([
+  ...MUTATION_TOOL_NAMES.write,
+  ...MUTATION_TOOL_NAMES.edit,
+  "file_write",
+]);
+const FILE_PARAMS = [
+  ...MUTATION_PATH_KEYS,
+  "file", "target", "to", "dest", "destination", "dir", "directory",
+];
+
+/** apply_patch and patch-shaped tools: scan the patch body itself, because
+ * the target file is named inside the patch. */
+const PATCH_TOOLS = new Set<string>([MUTATION_TOOL_NAMES.applyPatch, "applypatch"]);
+const PATCH_PARAMS = [...MUTATION_PATCH_KEYS];
 
 const MAX_SCAN_LENGTH = 16_384;
 const MAX_HITS = 8;
@@ -52,8 +76,11 @@ export interface SelfProtectionResult {
 
 /** Scan only the parameters that can carry a filesystem/command target. */
 function relevantParams(toolName: string, toolKind: string | undefined): string[] | undefined {
-  if (EXEC_TOOLS.has(toolName)) return EXEC_PARAMS;
-  if (FILE_TOOLS.has(toolName)) return FILE_PARAMS;
+  // Case-insensitive, like the analyzer's own name matching.
+  const name = toolName.toLowerCase();
+  if (EXEC_TOOLS.has(name)) return EXEC_PARAMS;
+  if (FILE_TOOLS.has(name)) return FILE_PARAMS;
+  if (PATCH_TOOLS.has(name)) return PATCH_PARAMS;
   if (toolKind && DESTRUCTIVE_TOOL_KINDS.has(toolKind)) {
     // e.g. code_mode_exec surfaced under a different name.
     return EXEC_PARAMS;

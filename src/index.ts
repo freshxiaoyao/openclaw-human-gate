@@ -881,9 +881,6 @@ const pluginEntry: OpenClawPluginDefinition = definePluginEntry({
                   scopeDigest: fingerprint?.windowKey?.slice(0, 19),
                   latencyMs: Date.now() - askedAt,
                 });
-                if (res === "deny" && sessionKey) {
-                  await denyCooldown.recordDeny(sessionKey, cooldownKey, Date.now());
-                }
                 // Session state is never shared or remembered without a trusted
                 // session key. The approved current call still proceeds.
                 if (!sessionKey) {
@@ -988,6 +985,22 @@ const pluginEntry: OpenClawPluginDefinition = definePluginEntry({
                   res === "deny"
                 ) {
                   await adaptiveLease.deny(sessionKey, fingerprint);
+                }
+                // Best-effort deny cooldown, deliberately LAST and isolated:
+                // lease/grant revocation above is the authorization teardown
+                // and must never be interrupted by a cooldown persistence
+                // failure. On failure the next matching call simply asks
+                // again (fail toward asking).
+                if (res === "deny" && sessionKey) {
+                  try {
+                    await denyCooldown.recordDeny(sessionKey, cooldownKey, Date.now());
+                  } catch (err) {
+                    log.warn(logPayload("human-gate: deny cooldown record failed; next call will ask again", {
+                      error: String(err),
+                      tool: event.toolName,
+                      sessionId: ctx.sessionId,
+                    }));
+                  }
                 }
               } catch (err) {
                 // Reuse begins only after the session-extension update

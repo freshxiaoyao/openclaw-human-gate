@@ -12,6 +12,12 @@
  * (`read`, `openclaw doctor`, `status`) stays usable. Only carriers that
  * can mutate are escalated — destructive toolKinds, file tools, and
  * unknown tools (fail-closed).
+ *
+ * Tool-name and parameter shapes are aligned with the semantic analyzer's
+ * canonical vocabulary (see `analysis/file-mutation.ts`), so the scan
+ * covers the same envelopes the analyzer trusts: write/write_file/writefile,
+ * edit/edit_file/editfile, apply_patch (canonical `input`), and exec-like
+ * command parameters.
  */
 export declare const SELF_PROTECTION_VERSION: 1;
 export interface SelfProtectionHit {

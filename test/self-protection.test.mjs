@@ -44,6 +44,45 @@ test("apply_patch whose patch body touches openclaw.json escalates", () => {
   assert.equal(escalate, true);
 });
 
+test("apply_patch canonical input param escalates", () => {
+  const { hits, escalate } = classifySensitiveEscalation("apply_patch", "apply_patch", {
+    input: "*** Update File: openclaw.json",
+  });
+  assert.equal(escalate, true, "OpenClaw canonical apply_patch uses { input }");
+  assert.equal(hits[0].param, "input");
+});
+
+test("analyzer-name variants (write_file, writeFile, editFile) escalate", () => {
+  assert.equal(
+    classifySensitiveEscalation("write_file", undefined, { path: "C:\\Users\\me\\.openclaw\\x" }).escalate,
+    true,
+  );
+  assert.equal(
+    classifySensitiveEscalation("writeFile", undefined, { path: "C:\\repo\\openclaw.json" }).escalate,
+    true,
+    "case-insensitive like the analyzer",
+  );
+  assert.equal(
+    classifySensitiveEscalation("editFile", undefined, { filePath: "C:\\Users\\me\\.openclaw\\openclaw.json" }).escalate,
+    true,
+  );
+  assert.equal(
+    classifySensitiveEscalation("edit_file", undefined, { file_path: "C:\\Users\\me\\.openclaw\\x" }).escalate,
+    true,
+  );
+});
+
+test("content payload mentioning the config does not false-positive", () => {
+  assert.equal(
+    classifySensitiveEscalation("write", "write", {
+      path: "C:\\repo\\notes.md",
+      content: "see openclaw.json for details",
+    }).escalate,
+    false,
+    "path is clean; payload text is not a mutation target",
+  );
+});
+
 test("ordinary file writes do not escalate", () => {
   const { hits, escalate } = classifySensitiveEscalation("write", "write", {
     path: "C:\\repo\\src\\app.ts",

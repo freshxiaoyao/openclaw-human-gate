@@ -8,6 +8,10 @@
  */
 export declare const DECISION_LOG_VERSION: 1;
 export declare const DEFAULT_MAX_ENTRIES = 512;
+/** Oldest ask timestamps kept for flood counting. askRate() windows are
+ * clamped to this retention, so the ask window is bounded even when nothing
+ * ever calls askRate(). */
+export declare const ASK_WINDOW_RETENTION_MS = 3600000;
 export type DecisionOutcome = "block" | "auto" | "ask" | "allow-once" | "allow-always" | "deny" | "timeout" | "cancelled";
 export interface DecisionLogEntry {
     ts: number;
@@ -34,14 +38,22 @@ export declare class DecisionLog {
     private readonly config;
     private readonly entries;
     private readonly askWindow;
+    /** Resolved once at construction — never on the decision hot path. */
+    private readonly logPath;
+    /** Serialized async appends preserve line order without blocking the gate. */
+    private fileQueue;
     constructor(config: DecisionLogConfig);
     get enabled(): boolean;
     record(entry: DecisionLogEntry): void;
     /** Snapshot of the ring buffer, oldest first. */
     snapshot(): DecisionLogEntry[];
-    /** Number of ask decisions in the trailing `ms` window (flood counter). */
+    /** Number of ask decisions in the trailing `ms` window (flood counter).
+     *  The window is clamped to ASK_WINDOW_RETENTION_MS. */
     askRate(ms: number, now?: number): number;
+    /** Await pending file appends (tests / shutdown). Resolves immediately when
+     *  file logging is disabled. Never rejects. */
+    flush(): Promise<void>;
     private bound;
-    private appendFile;
+    private enqueueAppend;
 }
 //# sourceMappingURL=decision-log.d.ts.map

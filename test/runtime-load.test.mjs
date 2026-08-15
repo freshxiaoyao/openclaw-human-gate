@@ -1194,6 +1194,29 @@ test("selfProtection.enabled=false restores the ordinary approval path", async (
   assert.equal(result?.block ?? false, false);
 });
 
+test("self-protection covers analyzer-name variants and apply_patch input", async () => {
+  const handler = await loadP0Handler(p0Config());
+  const ctx = adaptiveCtx();
+
+  for (const [name, params] of [
+    ["write_file", { path: "C:\\Users\\me\\.openclaw\\openclaw.json" }],
+    ["writeFile", { path: "C:\\Users\\me\\.openclaw\\x" }],
+    ["editFile", { filePath: "C:\\Users\\me\\.openclaw\\openclaw.json" }],
+    ["apply_patch", { input: "*** Update File: openclaw.json" }],
+  ]) {
+    const result = await handler({ toolName: name, params, toolCallId: `c-${name}` }, ctx);
+    assert.ok(result?.block, `${name} must be blocked by self-protection`);
+    assert.match(result.blockReason, /self-protection/i);
+  }
+
+  // Same envelope, clean path → ordinary approval, not blocked.
+  const clean = await handler(
+    { toolName: "writeFile", params: { path: "C:\\repo\\src\\app.ts" }, toolCallId: "c-clean" },
+    ctx,
+  );
+  assert.equal(clean?.block ?? false, false, "clean writes are not self-protection blocked");
+});
+
 test("deny cooldown blocks an immediate repeat", async () => {
   const handler = await loadP0Handler(p0Config({ denyCooldownMs: 60_000 }));
   const ctx = adaptiveCtx();
@@ -1242,4 +1265,60 @@ test("a deny does not cooldown a different path scope", async () => {
   // window), so a file in a *different directory* is a different scope.
   const other = await handler(writeEvent("C:\\repo\\lib\\other.ts", "call-2"), ctx);
   assert.ok(other?.requireApproval, "a different directory scope is not cooled down");
+});
+
+test("cooldown persistence failure never interrupts adaptive lease revocation", async () => {
+  // Backend whose deny-cooldown namespace writes always throw, simulating a
+  // store failure exactly at recordDeny time.
+  const store = new Map();
+  const failingBackend = {
+    store,
+    getSessionEntry({ sessionKey }) {
+      return store.get(sessionKey);
+    },
+    async patchSessionEntry({ sessionKey, update }) {
+      const current = store.get(sessionKey) ?? {};
+      const merged = { ...current, ...update(current) };
+      if (Object.hasOwn(merged.pluginExtensions?.["human-gate"] ?? {}, "deny-cooldown-v1")) {
+        throw new Error("simulated cooldown store failure");
+      }
+      store.set(sessionKey, merged);
+      return merged;
+    },
+  };
+  const entry = await loadPlugin();
+  const { api, calls } = createMockApi({
+    pluginConfig: adaptivePluginConfig("enforce", { maxUses: 1 }),
+    backend: failingBackend,
+  });
+  await entry.register(api);
+  const handler = hookFor(calls, "before_tool_call");
+  const ctx = adaptiveCtx();
+  const sessionKey = ctx.sessionKey;
+
+  const first = await handler(adaptiveEvent("call-1"), ctx);
+  assert.ok(first?.requireApproval);
+  await first.requireApproval.onResolution("allow-always"); // lease: 1 use
+
+  // Consume the single use (lease stays stored, exhausted).
+  assert.deepEqual(
+    await handler(adaptiveEvent("call-2"), ctx),
+    { params: { path: "C:\\repo\\src\\a.ts" } },
+  );
+
+  // Exhausted → prompt → deny. The cooldown write fails, but the adaptive
+  // lease must STILL be revoked (teardown runs first, isolated from the
+  // best-effort cooldown record).
+  const denied = await handler(adaptiveEvent("call-3"), ctx);
+  assert.ok(denied?.requireApproval);
+  await denied.requireApproval.onResolution("deny");
+
+  const adaptive = store.get(sessionKey)?.pluginExtensions?.["human-gate"]?.["adaptive-auto-pass-v1"];
+  const leases = Object.keys(adaptive?.leases ?? {});
+  assert.equal(leases.length, 0, "lease revoked despite cooldown store failure");
+
+  // No trust remains: the next call prompts (never auto-passes).
+  const after = await handler(adaptiveEvent("call-4"), ctx);
+  assert.ok(after?.requireApproval, "no trust remains after the deny");
+  assert.equal(after?.block ?? false, false, "cooldown failure fails toward asking, not blocking");
 });
