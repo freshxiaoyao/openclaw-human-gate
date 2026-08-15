@@ -1,6 +1,6 @@
 {
   "name": "openclaw-human-gate",
-  "version": "0.5.2",
+  "version": "0.5.3",
   "description": "Semantic human-in-the-loop approval middleware for OpenClaw with parameter-aware risk analysis and redacted content previews.",
   "type": "module",
   "license": "MIT",
