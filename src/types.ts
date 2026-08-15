@@ -286,7 +286,7 @@ export const DEFAULT_CONFIG: HumanGateConfig = {
     threshold: 8,
   },
   clawdNotify: {
-    enabled: false,
+    enabled: true,
   },
   rules: [],
   autoPassSessionKeys: [":cron:", ":heartbeat"],

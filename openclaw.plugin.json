@@ -319,8 +319,8 @@
         "properties": {
           "enabled": {
             "type": "boolean",
-            "default": false,
-            "description": "When true, POST a 'notification' state to the local Clawd server whenever an approval is raised, so the desktop pet shows a visual reminder."
+            "default": true,
+            "description": "When true, POST a 'notification' state to the local Clawd server whenever an approval is raised, so the desktop pet shows a visual reminder. Harmless no-op when no Clawd is listening (localhost fire-and-forget)."
           }
         }
       },

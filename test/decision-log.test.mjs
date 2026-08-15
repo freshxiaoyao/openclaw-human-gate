@@ -158,5 +158,5 @@ test("resolveConfig parses the new P0 fields", () => {
   assert.equal(defaults.selfProtection.enabled, true);
   assert.equal(defaults.decisionLog.enabled, true);
   assert.equal(defaults.decisionLog.filePath, undefined);
-  assert.equal(defaults.clawdNotify.enabled, false, "clawdNotify is opt-in (default off)");
+  assert.equal(defaults.clawdNotify.enabled, true, "clawdNotify defaults on (localhost no-op when absent)");
 });

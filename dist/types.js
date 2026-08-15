@@ -57,7 +57,7 @@ export const DEFAULT_CONFIG = {
         threshold: 8,
     },
     clawdNotify: {
-        enabled: false,
+        enabled: true,
     },
     rules: [],
     autoPassSessionKeys: [":cron:", ":heartbeat"],
