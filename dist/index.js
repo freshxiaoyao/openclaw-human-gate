@@ -35,6 +35,7 @@ import { evaluatePolicy, isAutoPassContext } from "./policy.js";
 import { ALLOW_ALWAYS_STATE_VERSION, AllowAlwaysStore, normalizeAllowAlwaysState, } from "./state.js";
 import { DENY_COOLDOWN_STATE_VERSION, DenyCooldownStore, normalizeDenyCooldownState, } from "./deny-cooldown.js";
 import { DecisionLog, digestSessionKey } from "./decision-log.js";
+import { notifyClawd } from "./clawd-notify.js";
 import { classifySensitiveEscalation } from "./self-protection.js";
 import { WINDOW_STATE_VERSION, ApprovalWindowStore, normalizeWindowState, } from "./window.js";
 import { CommandAnalyzer } from "./analysis/command.js";
@@ -669,6 +670,16 @@ const pluginEntry = definePluginEntry({
                 scopeDigest: fingerprint?.windowKey?.slice(0, 19),
                 reason: decision.reason,
             });
+            // Optional Clawd desktop-pet reminder: local-only, fire-and-forget,
+            // never affects the approval flow.
+            if (config.clawdNotify.enabled) {
+                notifyClawd({
+                    state: "notification",
+                    event: "PermissionRequest",
+                    sessionId: ctx.sessionId,
+                    toolName: event.toolName,
+                });
+            }
             return {
                 // Bind the approval to the exact params that were analyzed and shown.
                 params: paramsSnapshot,

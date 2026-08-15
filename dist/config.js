@@ -135,6 +135,14 @@ function resolveFloodDetector(raw) {
         threshold: clampInteger(raw.threshold, d.threshold, 2, 1_000),
     };
 }
+function resolveClawdNotify(raw) {
+    const d = DEFAULT_CONFIG.clawdNotify;
+    if (!isObject(raw))
+        return { ...d };
+    return {
+        enabled: typeof raw.enabled === "boolean" ? raw.enabled : d.enabled,
+    };
+}
 function cloneParamCondition(condition) {
     const key = ownDataValue(condition, "key");
     if (Object.prototype.hasOwnProperty.call(condition, "equals")) {
@@ -196,6 +204,7 @@ export function resolveConfig(pluginConfig) {
             selfProtection: { ...DEFAULT_CONFIG.selfProtection },
             decisionLog: { ...DEFAULT_CONFIG.decisionLog },
             floodDetector: { ...DEFAULT_CONFIG.floodDetector },
+            clawdNotify: { ...DEFAULT_CONFIG.clawdNotify },
             rules: [...DEFAULT_CONFIG.rules],
             autoPassSessionKeys: [...DEFAULT_CONFIG.autoPassSessionKeys],
             writeRoots: [...DEFAULT_CONFIG.writeRoots],
@@ -231,6 +240,7 @@ export function resolveConfig(pluginConfig) {
         selfProtection: resolveSelfProtection(pluginConfig.selfProtection),
         decisionLog: resolveDecisionLog(pluginConfig.decisionLog),
         floodDetector: resolveFloodDetector(pluginConfig.floodDetector),
+        clawdNotify: resolveClawdNotify(pluginConfig.clawdNotify),
         rules: resolveRules(pluginConfig.rules),
         autoPassSessionKeys: Array.isArray(pluginConfig.autoPassSessionKeys)
             ? pluginConfig.autoPassSessionKeys.map(String)

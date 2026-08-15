@@ -56,6 +56,7 @@ import {
   normalizeDenyCooldownState,
 } from "./deny-cooldown.js";
 import { DecisionLog, digestSessionKey } from "./decision-log.js";
+import { notifyClawd } from "./clawd-notify.js";
 import { classifySensitiveEscalation } from "./self-protection.js";
 import {
   WINDOW_STATE_VERSION,
@@ -887,6 +888,16 @@ const pluginEntry: OpenClawPluginDefinition = definePluginEntry({
           scopeDigest: fingerprint?.windowKey?.slice(0, 19),
           reason: decision.reason,
         });
+        // Optional Clawd desktop-pet reminder: local-only, fire-and-forget,
+        // never affects the approval flow.
+        if (config.clawdNotify.enabled) {
+          notifyClawd({
+            state: "notification",
+            event: "PermissionRequest",
+            sessionId: ctx.sessionId,
+            toolName: event.toolName,
+          });
+        }
 
         return {
           // Bind the approval to the exact params that were analyzed and shown.

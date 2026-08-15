@@ -56,6 +56,9 @@ export const DEFAULT_CONFIG = {
         windowMs: 60_000,
         threshold: 8,
     },
+    clawdNotify: {
+        enabled: false,
+    },
     rules: [],
     autoPassSessionKeys: [":cron:", ":heartbeat"],
     writeRoots: [],

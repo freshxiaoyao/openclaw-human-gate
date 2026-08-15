@@ -1,0 +1,1 @@
+{"version":3,"file":"clawd-notify.d.ts","sourceRoot":"","sources":["../src/clawd-notify.ts"],"names":[],"mappings":"AAAA;;;;;;;;;;;;GAYG;AAQH,MAAM,WAAW,kBAAkB;IACjC,KAAK,EAAE,MAAM,CAAC;IACd,KAAK,EAAE,MAAM,CAAC;IACd,SAAS,CAAC,EAAE,MAAM,CAAC;IACnB,QAAQ,CAAC,EAAE,MAAM,CAAC;CACnB;AAED,oFAAoF;AACpF,wBAAgB,WAAW,CAAC,OAAO,EAAE,kBAAkB,GAAG,IAAI,CAc7D"}

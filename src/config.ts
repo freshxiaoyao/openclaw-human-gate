@@ -2,6 +2,7 @@ import type {
   AdaptiveAutoPassConfig,
   ApprovalPreviewConfig,
   ApprovalWindowConfig,
+  ClawdNotifyConfig,
   DecisionLogConfig,
   FloodDetectorConfig,
   GateRule,
@@ -160,6 +161,14 @@ function resolveFloodDetector(raw: unknown): FloodDetectorConfig {
   };
 }
 
+function resolveClawdNotify(raw: unknown): ClawdNotifyConfig {
+  const d = DEFAULT_CONFIG.clawdNotify;
+  if (!isObject(raw)) return { ...d };
+  return {
+    enabled: typeof raw.enabled === "boolean" ? raw.enabled : d.enabled,
+  };
+}
+
 function cloneParamCondition(condition: ParamCondition): ParamCondition {
   const key = ownDataValue(condition, "key") as string;
   if (Object.prototype.hasOwnProperty.call(condition, "equals")) {
@@ -224,6 +233,7 @@ export function resolveConfig(pluginConfig: unknown): HumanGateConfig {
       selfProtection: { ...DEFAULT_CONFIG.selfProtection },
       decisionLog: { ...DEFAULT_CONFIG.decisionLog },
       floodDetector: { ...DEFAULT_CONFIG.floodDetector },
+      clawdNotify: { ...DEFAULT_CONFIG.clawdNotify },
       rules: [...DEFAULT_CONFIG.rules],
       autoPassSessionKeys: [...DEFAULT_CONFIG.autoPassSessionKeys],
       writeRoots: [...DEFAULT_CONFIG.writeRoots],
@@ -271,6 +281,7 @@ export function resolveConfig(pluginConfig: unknown): HumanGateConfig {
     selfProtection: resolveSelfProtection(pluginConfig.selfProtection),
     decisionLog: resolveDecisionLog(pluginConfig.decisionLog),
     floodDetector: resolveFloodDetector(pluginConfig.floodDetector),
+    clawdNotify: resolveClawdNotify(pluginConfig.clawdNotify),
     rules: resolveRules(pluginConfig.rules),
     autoPassSessionKeys: Array.isArray(pluginConfig.autoPassSessionKeys)
       ? (pluginConfig.autoPassSessionKeys as unknown[]).map(String)

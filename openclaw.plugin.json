@@ -312,6 +312,18 @@
           }
         }
       },
+      "clawdNotify": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "Optional Clawd on Desk desktop-pet notification. Local-only (127.0.0.1), fire-and-forget; a notification failure never affects the approval flow.",
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "default": false,
+            "description": "When true, POST a 'notification' state to the local Clawd server whenever an approval is raised, so the desktop pet shows a visual reminder."
+          }
+        }
+      },
       "rules": {
         "type": "array",
         "description": "Ordered policy rules. First match wins.",

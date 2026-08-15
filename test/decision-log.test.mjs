@@ -140,12 +140,14 @@ test("resolveConfig parses the new P0 fields", () => {
     denyCooldownMs: 45_000,
     selfProtection: { enabled: false },
     decisionLog: { enabled: false, maxEntries: 64, filePath: "~/logs/hg.jsonl" },
+    clawdNotify: { enabled: true },
   });
   assert.equal(cfg.denyCooldownMs, 45_000);
   assert.equal(cfg.selfProtection.enabled, false);
   assert.equal(cfg.decisionLog.enabled, false);
   assert.equal(cfg.decisionLog.maxEntries, 64);
   assert.equal(cfg.decisionLog.filePath, "~/logs/hg.jsonl");
+  assert.equal(cfg.clawdNotify.enabled, true);
 
   const clamped = resolveConfig({ denyCooldownMs: 99_999_999, decisionLog: { maxEntries: 1 } });
   assert.equal(clamped.denyCooldownMs, 3_600_000);
@@ -156,4 +158,5 @@ test("resolveConfig parses the new P0 fields", () => {
   assert.equal(defaults.selfProtection.enabled, true);
   assert.equal(defaults.decisionLog.enabled, true);
   assert.equal(defaults.decisionLog.filePath, undefined);
+  assert.equal(defaults.clawdNotify.enabled, false, "clawdNotify is opt-in (default off)");
 });

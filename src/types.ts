@@ -114,6 +114,8 @@ export interface HumanGateConfig {
   decisionLog: DecisionLogConfig;
   /** Approval-flood detector: non-authorizing hint when ask rate is high. */
   floodDetector: FloodDetectorConfig;
+  /** Optional Clawd on Desk desktop-pet notification. */
+  clawdNotify: ClawdNotifyConfig;
   /** Ordered policy rules. First match wins. */
   rules: GateRule[];
   /** Session-key `:`-delimited segments that auto-pass the approval prompt
@@ -206,6 +208,14 @@ export interface FloodDetectorConfig {
   threshold: number;
 }
 
+/** Optional Clawd on Desk desktop-pet notification. Local-only (127.0.0.1),
+ *  fire-and-forget; a notification failure never affects the approval flow. */
+export interface ClawdNotifyConfig {
+  /** When true, POST a `notification` state to the local Clawd server whenever
+   * an approval is raised, so the desktop pet shows a visual reminder. */
+  enabled: boolean;
+}
+
 /** Controls bounded adaptive auto-pass evaluation for repeated file writes. */
 export interface AdaptiveAutoPassConfig {
   /** off = disabled; shadow = record candidates without changing decisions;
@@ -274,6 +284,9 @@ export const DEFAULT_CONFIG: HumanGateConfig = {
     enabled: true,
     windowMs: 60_000,
     threshold: 8,
+  },
+  clawdNotify: {
+    enabled: false,
   },
   rules: [],
   autoPassSessionKeys: [":cron:", ":heartbeat"],
