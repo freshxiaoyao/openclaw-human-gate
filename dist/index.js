@@ -48,12 +48,14 @@ import { ApprovalPresenter } from "./preview/presenter.js";
 import { createAuthorizationFingerprint, createPolicyIdentity, normalizeTrustedRoot, } from "./scope.js";
 import { ADAPTIVE_STATE_VERSION, AdaptiveLeaseStore, normalizeAdaptiveState, } from "./adaptive/state.js";
 import { evaluateAdaptiveEligibility } from "./adaptive/eligibility.js";
+import { DEFAULT_EXEC_LEASE_MS, EXEC_LEASE_STATE_VERSION, ExecLeaseStore, isOrdinaryExec, normalizeExecLeaseState, parseExecLeaseDuration, } from "./exec-lease.js";
 const PLUGIN_ID = "human-gate";
 const ASK_TOOL_NAME = "human_gate_ask";
 const ALLOW_ALWAYS_NAMESPACE = "allow-always-v2";
 const WINDOW_NAMESPACE = "approval-window-v2";
 const ADAPTIVE_NAMESPACE = "adaptive-auto-pass-v1";
 const DENY_COOLDOWN_NAMESPACE = "deny-cooldown-v1";
+const EXEC_LEASE_NAMESPACE = "exec-lease-v1";
 const HOOK_PRIORITY = 60;
 // OpenClaw runs typed hooks in descending numeric priority. There is no public
 // finalizer hook, so this ordinary-hook compatibility seal deliberately sorts
@@ -100,6 +102,10 @@ function appendDescriptionHint(description, hint, max) {
 function adaptiveLeaseLabel(ttlMs, maxUses) {
     const minutes = Math.max(1, Math.round(ttlMs / 60_000));
     return `${maxUses}-use/${minutes}-minute`;
+}
+function formatLeaseRemaining(ms) {
+    const minutes = Math.max(1, Math.ceil(ms / 60_000));
+    return minutes === 60 ? "1 hour" : `${minutes} minutes`;
 }
 function cloneJsonLike(value, seen, budget, depth) {
     budget.nodes += 1;
@@ -273,11 +279,69 @@ const pluginEntry = definePluginEntry({
             namespace: DENY_COOLDOWN_NAMESPACE,
             description: "Per-session deny cooldowns for Human Gate",
         });
+        api.session.state.registerSessionExtension({
+            namespace: EXEC_LEASE_NAMESPACE,
+            description: "Owner-issued temporary lease for ordinary shell exec calls",
+        });
         const allowAlways = new AllowAlwaysStore((sessionKey) => normalizeAllowAlwaysState(extensionValue(api, sessionKey, ALLOW_ALWAYS_NAMESPACE)), (sessionKey, update) => patchExtension(api, sessionKey, ALLOW_ALWAYS_NAMESPACE, { version: ALLOW_ALWAYS_STATE_VERSION, grants: {} }, normalizeAllowAlwaysState, update), config.allowAlwaysTtlMs);
         const approvalWindow = new ApprovalWindowStore((sessionKey) => normalizeWindowState(extensionValue(api, sessionKey, WINDOW_NAMESPACE)), (sessionKey, update) => patchExtension(api, sessionKey, WINDOW_NAMESPACE, { version: WINDOW_STATE_VERSION, windows: {} }, normalizeWindowState, update));
         const adaptiveLease = new AdaptiveLeaseStore((sessionKey) => normalizeAdaptiveState(extensionValue(api, sessionKey, ADAPTIVE_NAMESPACE)), (sessionKey, update) => patchExtension(api, sessionKey, ADAPTIVE_NAMESPACE, { version: ADAPTIVE_STATE_VERSION, observations: {}, receipts: {}, leases: {} }, normalizeAdaptiveState, update), config.adaptiveAutoPass);
         const denyCooldown = new DenyCooldownStore((sessionKey) => normalizeDenyCooldownState(extensionValue(api, sessionKey, DENY_COOLDOWN_NAMESPACE)), (sessionKey, update) => patchExtension(api, sessionKey, DENY_COOLDOWN_NAMESPACE, { version: DENY_COOLDOWN_STATE_VERSION, denials: {} }, normalizeDenyCooldownState, update), config.denyCooldownMs);
+        const execLease = new ExecLeaseStore((sessionKey) => normalizeExecLeaseState(extensionValue(api, sessionKey, EXEC_LEASE_NAMESPACE)), (sessionKey, update) => patchExtension(api, sessionKey, EXEC_LEASE_NAMESPACE, { version: EXEC_LEASE_STATE_VERSION }, normalizeExecLeaseState, update));
         const decisionLog = new DecisionLog(config.decisionLog);
+        api.registerCommand({
+            name: "human_gate_exec",
+            description: "Temporarily auto-pass non-critical exec calls in this session",
+            acceptsArgs: true,
+            requireAuth: true,
+            requiredScopes: ["operator.admin"],
+            exposeSenderIsOwner: true,
+            handler: async (ctx) => {
+                const ownerAuthorized = ctx.isAuthorizedSender &&
+                    (ctx.senderIsOwner === true || ctx.gatewayClientScopes?.includes("operator.admin") === true);
+                if (!ownerAuthorized) {
+                    return { text: "Human Gate: only an authorized owner can manage exec leases." };
+                }
+                const sessionKey = ctx.sessionKey;
+                if (!sessionKey) {
+                    return { text: "Human Gate: this command requires a stable session." };
+                }
+                if (!config.semanticAnalysis.enabled) {
+                    return { text: "Human Gate: enable semanticAnalysis before creating an exec lease." };
+                }
+                const arg = (ctx.args ?? "").trim().toLowerCase();
+                if (!arg || arg === "status") {
+                    const status = execLease.status(sessionKey);
+                    return {
+                        text: status.active
+                            ? `Human Gate: exec lease is active for ${formatLeaseRemaining(status.remainingMs)} (until ${status.expiresAt}).`
+                            : "Human Gate: no active exec lease in this session.",
+                    };
+                }
+                if (arg === "off" || arg === "revoke") {
+                    await execLease.revoke(sessionKey);
+                    log.info(logPayload("human-gate: exec lease revoked", {
+                        sessionDigest: digestSessionKey(sessionKey),
+                    }));
+                    return { text: "Human Gate: exec lease revoked. Exec calls will be gated normally." };
+                }
+                const ttlMs = parseExecLeaseDuration(arg === "on" ? String(DEFAULT_EXEC_LEASE_MS / 60_000) : arg);
+                if (!ttlMs) {
+                    return { text: "Usage: /human_gate_exec <1-60m|1h|status|off> (example: /human_gate_exec 15m)" };
+                }
+                const status = await execLease.grant(sessionKey, ttlMs);
+                if (!status.active) {
+                    return { text: "Human Gate: exec lease could not be created." };
+                }
+                log.info(logPayload("human-gate: exec lease granted", {
+                    sessionDigest: digestSessionKey(sessionKey),
+                    ttlMs,
+                }));
+                return {
+                    text: `Human Gate: non-critical exec calls are auto-passed in this session for ${formatLeaseRemaining(ttlMs)}. Explicit blocks, deny cooldowns, critical findings, self-protection, and Code Mode still require enforcement. Use /human_gate_exec off to revoke early.`,
+                };
+            },
+        });
         // The same event object is passed to every ordinary hook. Capture the
         // gate-time snapshot by object identity so an intervening handler cannot
         // defeat the final seal by mutating event.params in place.
@@ -523,6 +587,27 @@ const pluginEntry = definePluginEntry({
                     reason: blockReason,
                 });
                 return { block: true, blockReason };
+            }
+            // Explicit owner-issued escape hatch for long-running tasks. It applies
+            // only to ordinary shell exec in this exact session, after explicit
+            // blocks and deny cooldowns, and never bypasses critical analysis,
+            // self-protection, or Code Mode.
+            if (sessionKey &&
+                isOrdinaryExec(event.toolName, event.toolKind, event.toolInputKind) &&
+                decision.severity !== "critical" &&
+                !selfProtection.escalate &&
+                execLease.isActive(sessionKey, now)) {
+                decisionLog.record({
+                    ts: now,
+                    sessionDigest: digestSessionKey(sessionKey),
+                    sessionId: ctx.sessionId,
+                    toolName: event.toolName,
+                    ruleId: decision.rule?.id,
+                    decision: "auto",
+                    severity: decision.severity,
+                    reason: "owner-issued temporary exec lease",
+                });
+                return { params: paramsSnapshot };
             }
             if (adaptiveOwns) {
                 // Semantically adaptive-owned calls never fall back to legacy

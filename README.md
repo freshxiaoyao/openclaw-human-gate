@@ -74,6 +74,9 @@ cooldown · JSONL audit log**
   path-bound, and expire after `allowAlwaysTtlMs` (default 4h). The native
   button still reads "allow-always"; internally it is a bounded session/task
   lease, never an unlimited grant.
+- **Owner-issued exec lease** — `/human_gate_exec 15m` temporarily auto-passes
+  non-critical ordinary `exec` calls in the current session, with a hard
+  one-hour maximum and immediate revocation via `/human_gate_exec off`.
 - **Experimental adaptive safe-file lease** — an opt-in controller can shadow,
   suggest, or enforce a finite-use, short-lived lease for completely analyzed,
   non-destructive file writes with absolute targets. It never learns authority
@@ -206,6 +209,27 @@ targets, fixed expiry, and a finite use budget. They never learn authority from
 See [Approval reuse and adaptive leases](docs/approval-reuse.md) for scope
 semantics, development-loop configuration, lease modes, migration behavior,
 and rollback guidance.
+
+## Temporary exec lease for long tasks
+
+An authorized owner can deliberately trade per-command review for bounded
+autonomy in the current session:
+
+```text
+/human_gate_exec 15m     # enable for 15 minutes (1..60 minutes)
+/human_gate_exec status  # show the remaining time
+/human_gate_exec off     # revoke immediately
+```
+
+The lease covers only ordinary shell `exec`. Explicit block rules, recent deny
+cooldowns, semantic `critical` findings, self-protection, and Code Mode remain
+enforced. The command requires owner or `operator.admin` authority, a stable
+session, and enabled semantic analysis. It is intentionally not an agent-callable
+tool, so an agent cannot grant the lease to itself.
+
+This is an explicit escape hatch, not a sandbox: during the lease, warning,
+unknown, and incompletely classified exec commands may run without another
+prompt. Use the shortest practical duration and revoke it when the task ends.
 
 ## Parameter-aware semantic analysis
 
@@ -478,6 +502,7 @@ plugin-callable TUI selector API. Chat is the selector.
 - `src/decision-log.ts` — bounded in-memory decision history and optional JSONL
   audit output.
 - `src/deny-cooldown.ts` — semantic-scope cooldown after an explicit denial.
+- `src/exec-lease.ts` — owner-issued, session-scoped temporary exec lease.
 - `src/self-protection.ts` — escalation-only protection for recognized calls
   targeting OpenClaw's authority surface.
 - `src/policy.ts` — rule-matching engine (pure).

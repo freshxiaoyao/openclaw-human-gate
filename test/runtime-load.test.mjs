@@ -67,7 +67,7 @@ function createDeferredSessionBackend() {
 
 /** Build a mock OpenClawPluginApi and record all registration calls. */
 function createMockApi({ pluginConfig = {}, backend } = {}) {
-  const calls = { on: [], registerTool: [], extensions: [], resolveAgentWorkspaceDir: 0 };
+  const calls = { on: [], registerTool: [], registerCommand: [], extensions: [], resolveAgentWorkspaceDir: 0 };
   const api = {
     logger: {
       info() {},
@@ -99,6 +99,9 @@ function createMockApi({ pluginConfig = {}, backend } = {}) {
     },
     registerTool(tool, opts) {
       calls.registerTool.push({ tool, opts });
+    },
+    registerCommand(command) {
+      calls.registerCommand.push(command);
     },
   };
   return { api, calls };
@@ -161,10 +164,143 @@ test("plugin entry loads and registers against the mock API", async () => {
   assert.ok(calls.on.some((r) => r.name === "after_tool_call"));
   assert.equal(calls.registerTool.length, 1);
   assert.equal(calls.registerTool[0].tool.name, "human_gate_ask");
+  assert.equal(calls.registerCommand.length, 1);
+  assert.equal(calls.registerCommand[0].name, "human_gate_exec");
   assert.deepEqual(
     calls.extensions.map((e) => e.namespace).sort(),
-    ["adaptive-auto-pass-v1", "allow-always-v2", "approval-window-v2", "deny-cooldown-v1"],
+    ["adaptive-auto-pass-v1", "allow-always-v2", "approval-window-v2", "deny-cooldown-v1", "exec-lease-v1"],
   );
+});
+
+test("owner-issued exec lease auto-passes warning exec but not critical or Code Mode", async () => {
+  const entry = await loadPlugin();
+  const backend = createSessionBackend();
+  const { api, calls } = createMockApi({ backend });
+  await entry.register(api);
+  const command = calls.registerCommand.find((item) => item.name === "human_gate_exec");
+  assert.ok(command);
+  const sessionKey = "agent:main:lease-test";
+
+  const granted = await command.handler({
+    args: "15m",
+    commandBody: "/human_gate_exec 15m",
+    channel: "webchat",
+    config: {},
+    isAuthorizedSender: true,
+    senderIsOwner: true,
+    sessionKey,
+  });
+  assert.match(granted.text, /15 minutes/);
+
+  const handler = hookFor(calls, "before_tool_call");
+  const ctx = { sessionKey, sessionId: "session-lease", runId: "run-lease" };
+  assert.deepEqual(
+    await handler({ toolName: "exec", params: { command: "echo hello" } }, ctx),
+    { params: { command: "echo hello" } },
+  );
+
+  const critical = await handler({ toolName: "exec", params: { command: "rm -rf /" } }, ctx);
+  assert.ok(critical?.requireApproval, "critical shell command still asks");
+
+  const codeMode = await handler({
+    toolName: "exec",
+    toolKind: "code_mode_exec",
+    toolInputKind: "javascript",
+    params: { code: "return 1" },
+  }, ctx);
+  assert.ok(codeMode?.requireApproval, "Code Mode is outside the lease");
+
+  await command.handler({
+    args: "off",
+    commandBody: "/human_gate_exec off",
+    channel: "webchat",
+    config: {},
+    isAuthorizedSender: true,
+    senderIsOwner: true,
+    sessionKey,
+  });
+  const after = await handler({ toolName: "exec", params: { command: "echo hello" } }, ctx);
+  assert.ok(after?.requireApproval, "revocation restores ordinary gating");
+});
+
+test("exec lease command requires owner authority and semantic analysis", async () => {
+  const entry = await loadPlugin();
+  const { api, calls } = createMockApi({ pluginConfig: { semanticAnalysis: { enabled: false } } });
+  await entry.register(api);
+  const command = calls.registerCommand.find((item) => item.name === "human_gate_exec");
+
+  const denied = await command.handler({
+    args: "15m",
+    commandBody: "/human_gate_exec 15m",
+    channel: "webchat",
+    config: {},
+    isAuthorizedSender: true,
+    senderIsOwner: false,
+    sessionKey: "agent:main:lease-denied",
+  });
+  assert.match(denied.text, /only an authorized owner/);
+
+  const disabled = await command.handler({
+    args: "15m",
+    commandBody: "/human_gate_exec 15m",
+    channel: "webchat",
+    config: {},
+    isAuthorizedSender: true,
+    senderIsOwner: true,
+    sessionKey: "agent:main:lease-disabled",
+  });
+  assert.match(disabled.text, /enable semanticAnalysis/);
+});
+
+test("exec lease cannot bypass explicit block rules or an earlier deny cooldown", async () => {
+  const entry = await loadPlugin();
+  const blockedBackend = createSessionBackend();
+  const blockedApi = createMockApi({
+    backend: blockedBackend,
+    pluginConfig: {
+      rules: [{ id: "never-exec", toolName: "exec", mode: "block" }],
+    },
+  });
+  await entry.register(blockedApi.api);
+  const blockedCommand = blockedApi.calls.registerCommand[0];
+  const blockedSession = "agent:main:lease-explicit-block";
+  await blockedCommand.handler({
+    args: "15m",
+    commandBody: "/human_gate_exec 15m",
+    channel: "webchat",
+    config: {},
+    isAuthorizedSender: true,
+    senderIsOwner: true,
+    sessionKey: blockedSession,
+  });
+  const explicitlyBlocked = await hookFor(blockedApi.calls, "before_tool_call")(
+    { toolName: "exec", params: { command: "echo hello" } },
+    { sessionKey: blockedSession, sessionId: "blocked", runId: "blocked-run" },
+  );
+  assert.equal(explicitlyBlocked?.block, true);
+
+  const cooldownBackend = createSessionBackend();
+  const cooldownApi = createMockApi({ backend: cooldownBackend });
+  await entry.register(cooldownApi.api);
+  const cooldownHandler = hookFor(cooldownApi.calls, "before_tool_call");
+  const cooldownSession = "agent:main:lease-deny-cooldown";
+  const cooldownCtx = { sessionKey: cooldownSession, sessionId: "cooldown", runId: "cooldown-run" };
+  const event = { toolName: "exec", params: { command: "echo hello" } };
+  const first = await cooldownHandler(event, cooldownCtx);
+  assert.ok(first?.requireApproval);
+  await first.requireApproval.onResolution("deny");
+
+  await cooldownApi.calls.registerCommand[0].handler({
+    args: "15m",
+    commandBody: "/human_gate_exec 15m",
+    channel: "webchat",
+    config: {},
+    isAuthorizedSender: true,
+    senderIsOwner: true,
+    sessionKey: cooldownSession,
+  });
+  const cooled = await cooldownHandler(event, cooldownCtx);
+  assert.equal(cooled?.block, true, "deny cooldown wins over a later exec lease");
 });
 
 test("destructive call requests approval; allow-once opens the window", async () => {

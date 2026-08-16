@@ -5,6 +5,37 @@ tool as equivalent. Reuse is derived from complete semantic analysis and a
 versioned authorization fingerprint. If a safe fingerprint cannot be built,
 the call asks again.
 
+## Owner-issued temporary exec lease
+
+For a long-running task that needs many unrelated shell commands, an authorized
+owner can open a deliberately broad but time-bounded lease in the active
+session:
+
+```text
+/human_gate_exec 15m
+/human_gate_exec status
+/human_gate_exec off
+```
+
+A bare number means minutes; accepted durations are one through sixty minutes,
+with `1h` as the maximum. `/human_gate_exec on` uses the 15-minute default.
+The lease is stored in the current session extension and expires at a fixed
+time; it is not a sliding window.
+
+The lease auto-passes ordinary `exec` calls whose final decision is not
+critical. It is evaluated only after explicit block rules and deny cooldowns.
+It does not cover Code Mode, does not bypass self-protection, and cannot be
+created while semantic analysis is disabled. Only an authorized owner or a
+gateway client with `operator.admin` can invoke the slash command. No
+agent-callable tool is exposed for granting it.
+
+This mechanism intentionally allows warning, unknown, and incompletely
+classified commands during its lifetime. Semantic analysis catches known
+critical patterns but cannot prove that an arbitrary script, alias, hook, or
+subprocess is safe. Treat the lease as a bounded operator override: keep it
+short, use `status` during long tasks, and revoke it as soon as broad exec
+authority is no longer needed.
+
 ## Approval window
 
 ```json5
