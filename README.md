@@ -25,6 +25,8 @@ write ~/.openclaw/openclaw.json    → 🔴 critical + self-protection
 ```bash
 openclaw plugins install openclaw-human-gate
 openclaw plugins inspect human-gate --runtime --json
+##update
+openclaw plugins update openclaw-human-gate
 ```
 
 Zero configuration required: the default posture auto-passes recognized reads
